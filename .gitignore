@@ -1,0 +1,24 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Model weights (large binary files — download on first run)
+models/*.ckpt
+models/*.yaml
+models/*.onnx
+
+# Secrets
+.env
+
+# Output directories
+output/
+out/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/

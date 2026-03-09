@@ -1,0 +1,1062 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Neiro</title>
+  <style>
+    /* ── Design tokens ─────────────────────────────────────────────────── */
+    :root {
+      --bg:        #282828;
+      --surface:   #32302f;
+      --surface2:  #3c3836;
+      --border:    #504945;
+      --text:      #ebdbb2;
+      --muted:     #a89984;
+      --green:     #8ec07c;
+      --green-dk:  #689d6a;
+      --purple:    #d3869b;
+      --purple-dk: #b16286;
+      --amber:     #d79921;
+      --amber-dk:  #b57614;
+      --red:       #fb4934;
+      --radius:    12px;
+      --shadow:    0 2px 20px rgba(0,0,0,.45);
+    }
+
+    /* ── Reset & base ───────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem 4rem;
+    }
+
+    .container { width: 100%; max-width: 620px; }
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+    header { text-align: center; margin-bottom: 2rem; }
+    header h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -.02em; }
+    header h1 span { color: var(--green); }
+    header p  { margin-top: .4rem; color: var(--muted); font-size: .95rem; }
+
+    /* ── Card ────────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 1.75rem;
+      margin-bottom: 1.25rem;
+    }
+    .card.hidden { display: none; }
+
+    /* ── Drop zone ───────────────────────────────────────────────────────── */
+    #drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: 8px;
+      padding: 2.25rem 1rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+    }
+    #drop-zone:hover, #drop-zone.dragover {
+      border-color: var(--green);
+      background: rgba(142,192,124,.07);
+    }
+    #drop-zone .icon { font-size: 2.25rem; display: block; margin-bottom: .5rem; }
+    #drop-zone p { color: var(--muted); font-size: .9rem; }
+    #drop-zone p strong { color: var(--text); }
+    #file-input { display: none; }
+    #file-name {
+      margin-top: .75rem;
+      font-size: .875rem;
+      color: var(--green-dk);
+      font-weight: 500;
+      min-height: 1.2em;
+    }
+
+    /* ── Mode toggle ─────────────────────────────────────────────────────── */
+    .mode-row {
+      display: flex;
+      gap: .75rem;
+      margin-top: 1.25rem;
+    }
+    .mode-btn {
+      flex: 1;
+      padding: .6rem;
+      border: 2px solid var(--border);
+      border-radius: 8px;
+      background: transparent;
+      font-size: .9rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: border-color .15s, background .15s, color .15s;
+      color: var(--muted);
+    }
+    .mode-btn.active {
+      border-color: var(--green);
+      background: rgba(142,192,124,.1);
+      color: var(--green);
+    }
+
+    /* ── Checkbox row ────────────────────────────────────────────────────── */
+    .check-row {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      margin-top: 1rem;
+      font-size: .9rem;
+      color: var(--text);
+    }
+    .check-row input[type=checkbox] { accent-color: var(--green); width: 16px; height: 16px; cursor: pointer; }
+    .check-row label { cursor: pointer; }
+
+    /* ── Advanced toggle ─────────────────────────────────────────────────── */
+    .adv-toggle {
+      display: flex;
+      align-items: center;
+      gap: .4rem;
+      margin-top: 1.25rem;
+      font-size: .875rem;
+      color: var(--purple);
+      cursor: pointer;
+      user-select: none;
+      font-weight: 500;
+    }
+    .adv-toggle:hover { color: var(--text); }
+    .adv-toggle .arrow { transition: transform .2s; display: inline-block; }
+    .adv-toggle.open .arrow { transform: rotate(90deg); }
+
+    #advanced-panel {
+      display: none;
+      margin-top: 1rem;
+      border-top: 1px solid var(--border);
+      padding-top: 1rem;
+    }
+    #advanced-panel.open { display: block; }
+
+    /* ── Model grid ──────────────────────────────────────────────────────── */
+    .model-grid { display: flex; flex-direction: column; gap: .6rem; }
+    .model-row {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      font-size: .875rem;
+    }
+    .model-row input[type=checkbox] { accent-color: var(--green); width: 15px; height: 15px; flex-shrink: 0; }
+    .model-row label { flex: 1; cursor: pointer; }
+    .model-row .tooltip {
+      color: var(--muted);
+      font-size: .75rem;
+      cursor: help;
+    }
+    .weight-input {
+      width: 64px;
+      padding: .25rem .4rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: .8rem;
+      text-align: center;
+      color: var(--text);
+      background: var(--surface2);
+    }
+    .weight-label { font-size: .75rem; color: var(--muted); }
+    .opt-hint {
+      font-size: .72rem; color: var(--muted);
+      margin: -.15rem 0 .4rem 20px;
+      line-height: 1.45;
+    }
+
+    /* ── Slider row ──────────────────────────────────────────────────────── */
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+      margin-top: .9rem;
+      font-size: .875rem;
+    }
+    .slider-row label { width: 90px; flex-shrink: 0; color: var(--text); }
+    .slider-row input[type=range] {
+      flex: 1;
+      accent-color: var(--green);
+      cursor: pointer;
+    }
+    .slider-row .val { width: 28px; text-align: right; font-weight: 600; color: var(--green); }
+
+    /* ── Select ──────────────────────────────────────────────────────────── */
+    select, input[type=number] {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: .3rem .5rem;
+      font-size: .875rem;
+      background: var(--surface2);
+      color: var(--text);
+    }
+
+    /* ── Submit button ───────────────────────────────────────────────────── */
+    #submit-btn {
+      display: block;
+      width: 100%;
+      margin-top: 1.5rem;
+      padding: .85rem;
+      background: var(--amber);
+      color: var(--bg);
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    #submit-btn:hover:not(:disabled) { background: var(--amber-dk); }
+    #submit-btn:disabled { opacity: .55; cursor: not-allowed; }
+
+    /* ── Progress card ───────────────────────────────────────────────────── */
+    .stage-label {
+      font-size: .95rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: .75rem;
+    }
+    .prog-section-label {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-size: .78rem;
+      color: var(--muted);
+      margin-bottom: .3rem;
+    }
+    .prog-section-label span:last-child { font-weight: 600; color: var(--text); }
+    .progress-bar-bg {
+      width: 100%;
+      height: 8px;
+      background: var(--border);
+      border-radius: 99px;
+      overflow: hidden;
+      margin-bottom: .9rem;
+    }
+    .progress-bar-bg.thin { height: 5px; margin-bottom: .6rem; }
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--green);
+      border-radius: 99px;
+      width: 0%;
+      transition: width .35s ease;
+    }
+    .stage-sub {
+      font-size: .8rem; color: var(--muted);
+      margin: -.2rem 0 .8rem; min-height: 1em;
+    }
+
+    @keyframes shimmer {
+      0%   { left: -40%; }
+      100% { left: 110%; }
+    }
+    .progress-bar-fill.pulsing {
+      width: 100% !important;
+      background: var(--surface2);
+      position: relative;
+    }
+    .progress-bar-fill.pulsing::after {
+      content: '';
+      position: absolute; top: 0; left: -40%;
+      width: 40%; height: 100%;
+      background: linear-gradient(90deg, transparent, var(--purple), transparent);
+      animation: shimmer 1.5s ease-in-out infinite;
+    }
+
+    .log-toggle {
+      font-size: .8rem;
+      color: var(--purple);
+      cursor: pointer;
+      user-select: none;
+      margin-bottom: .4rem;
+    }
+    .log-toggle:hover { color: var(--text); }
+    #log-area {
+      display: none;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: .75rem;
+      font-size: .75rem;
+      font-family: "SF Mono", "Fira Code", monospace;
+      color: var(--muted);
+      height: 140px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+    #log-area.open { display: block; }
+
+    /* ── Results card ────────────────────────────────────────────────────── */
+    .results-title { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; }
+    .stem-buttons { display: flex; flex-direction: column; gap: .5rem; }
+
+    /* ── Stem card (replaces .stem-btn) ─────────────────────────────────── */
+    .stem-card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface2);
+      padding: .75rem 1rem;
+      transition: border-color .15s;
+    }
+    .stem-card:hover { border-color: var(--purple); }
+    .stem-header {
+      display: flex; align-items: center; gap: .75rem; margin-bottom: .55rem;
+    }
+    .stem-icon { font-size: 1.2rem; width: 26px; text-align: center; }
+    .stem-name { flex: 1; font-size: .9rem; font-weight: 500; color: var(--text); }
+    .dl-btn {
+      font-size: .85rem; color: var(--muted); text-decoration: none;
+      padding: .2rem .4rem; border-radius: 4px; transition: color .15s;
+    }
+    .dl-btn:hover { color: var(--purple); }
+    .stem-player {
+      display: flex; align-items: center; gap: .6rem;
+    }
+    .play-btn {
+      width: 28px; height: 28px; border-radius: 50%;
+      border: 1.5px solid var(--purple); background: transparent;
+      color: var(--purple); font-size: .75rem; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background .15s, color .15s; flex-shrink: 0;
+    }
+    .play-btn:hover, .play-btn.playing {
+      background: var(--purple); color: var(--bg);
+    }
+    .seek-bg {
+      flex: 1; height: 4px; background: var(--border);
+      border-radius: 99px; cursor: pointer; position: relative;
+    }
+    .seek-fill {
+      height: 100%; background: var(--purple);
+      border-radius: 99px; width: 0%; pointer-events: none;
+      transition: width .1s linear;
+    }
+    .time-disp { font-size: .72rem; color: var(--muted); width: 36px; text-align: right; }
+
+    /* ── Results hint + share button ────────────────────────────────────── */
+    .results-hint {
+      font-size: .76rem; color: var(--muted); margin-top: .8rem; line-height: 1.5;
+    }
+    .share-btn {
+      display: block; width: 100%; margin-top: .75rem;
+      padding: .6rem; background: transparent;
+      border: 1.5px solid var(--purple); border-radius: 8px;
+      color: var(--purple); font-size: .875rem; font-weight: 500;
+      cursor: pointer; transition: background .15s, color .15s;
+    }
+    .share-btn:hover:not(:disabled) { background: var(--purple); color: var(--bg); }
+    .share-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+    /* ── Share row ───────────────────────────────────────────────────────── */
+    .share-row { display: flex; align-items: center; gap: .5rem; margin-top: .75rem; }
+    .share-label { font-size: .8rem; color: var(--muted); white-space: nowrap; }
+    .share-input {
+      flex: 1; background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 6px; padding: .3rem .5rem; font-size: .8rem; color: var(--muted);
+    }
+    #copy-btn {
+      padding: .3rem .75rem; background: var(--purple); color: var(--bg);
+      border: none; border-radius: 6px; font-size: .8rem; cursor: pointer; font-weight: 600;
+      white-space: nowrap; transition: background .15s;
+    }
+    #copy-btn:hover { background: var(--purple-dk); }
+
+    #reset-btn {
+      display: block;
+      width: 100%;
+      margin-top: 1.25rem;
+      padding: .7rem;
+      background: transparent;
+      border: 2px solid var(--border);
+      border-radius: 8px;
+      font-size: .9rem;
+      font-weight: 500;
+      color: var(--muted);
+      cursor: pointer;
+      transition: border-color .15s, color .15s;
+    }
+    #reset-btn:hover { border-color: var(--text); color: var(--text); }
+
+    /* ── 6-stem mode — hide vocal ensemble controls ──────────────────────── */
+    #advanced-panel.six-stem-active .model-grid,
+    #advanced-panel.six-stem-active p:first-child { display: none; }
+
+    /* ── Error state ─────────────────────────────────────────────────────── */
+    .error-box {
+      background: rgba(251,73,52,.12);
+      border: 1px solid rgba(251,73,52,.4);
+      border-radius: 8px;
+      padding: 1rem;
+      color: var(--red);
+      font-size: .875rem;
+      margin-bottom: 1rem;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- ── Header ─────────────────────────────────────────────────────────── -->
+  <header>
+    <h1><span>Neiro</span></h1>
+    <p>Separate any song into stems using deep-learning models.</p>
+  </header>
+
+  <!-- ── Upload card ────────────────────────────────────────────────────── -->
+  <div id="upload-card" class="card">
+
+    <div id="drop-zone">
+      <span class="icon">🎵</span>
+      <p><strong>Drop an MP3 here</strong> or click to browse</p>
+      <div id="file-name"></div>
+      <input type="file" id="file-input" accept=".mp3,.wav,.flac,.m4a,.ogg" />
+    </div>
+
+    <!-- Mode toggle -->
+    <div class="mode-row">
+      <button class="mode-btn active" id="btn-6stem" data-mode="6">6 Stems <small>(vocals, bass, drums, guitar, piano, other)</small></button>
+      <button class="mode-btn" id="btn-2stem" data-mode="2">2 Stems <small>(vocals + instrumental)</small></button>
+      <button class="mode-btn" id="btn-4stem" data-mode="4">4 Stems <small>(bass, drums, other, vocals)</small></button>
+    </div>
+
+    <!-- CPU checkbox -->
+    <div class="check-row">
+      <input type="checkbox" id="cpu-check" />
+      <label for="cpu-check">Run locally on CPU (no GPU required, slower)</label>
+    </div>
+
+    <!-- Advanced options -->
+    <div class="adv-toggle" id="adv-toggle">
+      <span class="arrow">▸</span> Advanced options
+    </div>
+    <div id="advanced-panel" class="six-stem-active">
+
+      <p style="font-size:.8rem;color:var(--muted);margin-bottom:.75rem;">
+        Vocal ensemble — enable models and set their blend weights (w):
+      </p>
+
+      <div class="model-grid">
+        <div class="model-row">
+          <input type="checkbox" id="use_BSRoformer" checked />
+          <label for="use_BSRoformer">BSRoformer</label>
+          <span class="weight-label">w:</span>
+          <input class="weight-input" type="number" id="weight_BSRoformer" value="9.18" step="0.01" min="0" />
+        </div>
+        <div class="opt-hint">Transformer model — highest overall quality. Recommended as primary model.</div>
+        <div class="model-row">
+          <input type="checkbox" id="use_Kim_MelRoformer" checked />
+          <label for="use_Kim_MelRoformer">Kim MelRoformer</label>
+          <span class="weight-label">w:</span>
+          <input class="weight-input" type="number" id="weight_Kim_MelRoformer" value="10" step="0.01" min="0" />
+        </div>
+        <div class="opt-hint">Mel-band transformer by KimberleyJSN — excellent on pop &amp; vocals, best default weight.</div>
+        <div class="model-row">
+          <input type="checkbox" id="use_InstVoc" checked />
+          <label for="use_InstVoc">InstVoc (MDX23C)</label>
+          <span class="weight-label">w:</span>
+          <input class="weight-input" type="number" id="weight_InstVoc" value="3.39" step="0.01" min="0" />
+        </div>
+        <div class="opt-hint">TFC-TDF network — fast and lightweight, good complement to the transformers above.</div>
+        <div class="model-row">
+          <input type="checkbox" id="use_VitLarge" />
+          <label for="use_VitLarge">VitLarge</label>
+          <span class="weight-label">w:</span>
+          <input class="weight-input" type="number" id="weight_VitLarge" value="1" step="0.01" min="0" />
+        </div>
+        <div class="opt-hint">ViT segmentation model — adds ensemble diversity. Slower; optional for quality boost.</div>
+        <div class="model-row">
+          <input type="checkbox" id="use_VOCFT" />
+          <label for="use_VOCFT">VOCFT (MDX)</label>
+          <span class="weight-label">w:</span>
+          <input class="weight-input" type="number" id="weight_VOCFT" value="1" step="0.01" min="0" />
+        </div>
+        <div class="opt-hint">MDX ONNX model fine-tuned for vocals. Enables Linkwitz-Riley crossover blending.</div>
+        <div class="model-row">
+          <input type="checkbox" id="use_InstHQ4" />
+          <label for="use_InstHQ4">InstHQ4 (MDX)</label>
+          <span class="weight-label">w:</span>
+          <input class="weight-input" type="number" id="weight_InstHQ4" value="1" step="0.01" min="0" />
+        </div>
+        <div class="opt-hint">MDX instrument model inverted for vocal extraction. Can improve presence on some tracks.</div>
+      </div>
+
+      <!-- BigShifts slider -->
+      <div class="slider-row" style="margin-top:1rem;">
+        <label for="BigShifts">BigShifts</label>
+        <input type="range" id="BigShifts" min="1" max="11" step="1" value="3" />
+        <span class="val" id="BigShifts-val">3</span>
+      </div>
+      <div class="opt-hint" style="margin-left:0">Pitch-shift averaging passes — more passes = better quality but slower. 1 = off, 3 is a good default, 11 = maximum quality.</div>
+
+      <!-- Output format -->
+      <div class="slider-row" style="margin-top:.9rem;">
+        <label for="output_format">Format</label>
+        <select id="output_format">
+          <option value="PCM_16">WAV 16-bit</option>
+          <option value="FLOAT">WAV float32</option>
+          <option value="FLAC">FLAC</option>
+        </select>
+      </div>
+      <div class="opt-hint" style="margin-left:0">FLAC is lossless and recommended. WAV 16-bit for broad compatibility. WAV float32 for DAW import.</div>
+
+      <!-- Input gain -->
+      <div class="slider-row">
+        <label for="input_gain">Input gain</label>
+        <input type="range" id="input_gain" min="-12" max="12" step="1" value="0" />
+        <span class="val" id="input_gain-val">0 dB</span>
+      </div>
+      <div class="opt-hint" style="margin-left:0">Boost or cut the track before separation. Useful if the source is very quiet or near-clipping.</div>
+
+      <div class="check-row" style="margin-top:.75rem;">
+        <input type="checkbox" id="restore_gain" />
+        <label for="restore_gain">Restore gain after separation</label>
+      </div>
+      <div class="opt-hint">Applies the inverse of input gain to the outputs so their loudness matches the original.</div>
+
+      <div class="check-row">
+        <input type="checkbox" id="filter_vocals" />
+        <label for="filter_vocals">Highpass filter vocals below 50 Hz</label>
+      </div>
+      <div class="opt-hint" style="margin-bottom:0">Removes low-frequency rumble from the vocals stem. Useful for cleaner voice tracks.</div>
+
+    </div><!-- /advanced-panel -->
+
+    <button id="submit-btn" disabled>Separate</button>
+  </div><!-- /upload-card -->
+
+  <!-- ── Progress card ──────────────────────────────────────────────────── -->
+  <div id="progress-card" class="card hidden">
+    <div class="stage-label" id="stage-label">Initialising…</div>
+    <div class="stage-sub" id="stage-sub"></div>
+    <div class="progress-bar-bg">
+      <div class="progress-bar-fill pulsing" id="prog-bar"></div>
+    </div>
+    <div class="log-toggle" id="log-toggle">▸ Show log</div>
+    <div id="log-area"></div>
+  </div>
+
+  <!-- ── Results card ───────────────────────────────────────────────────── -->
+  <div id="results-card" class="card hidden">
+    <div class="results-title">Stems ready</div>
+    <div class="stem-buttons" id="stem-buttons"></div>
+    <p class="results-hint hidden" id="results-hint">These stems live only in your browser — create a shareable link to save them permanently.</p>
+    <button id="share-btn" class="share-btn hidden">Create shareable link</button>
+    <div id="share-row" class="share-row hidden">
+      <span class="share-label">Share:</span>
+      <input id="share-url" class="share-input" readonly />
+      <button id="copy-btn">Copy</button>
+    </div>
+    <button id="reset-btn">Separate another file</button>
+  </div>
+
+</div><!-- /container -->
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let selectedFile = null;
+let vocalsOnly = false;
+let use6stem = true;
+let abortController = null;
+let blobUrls = [];
+let currentFilesB64 = null;
+
+// Model labels / icons
+const MODEL_ICONS = {
+  vocals:  { icon: '🎤', label: 'Vocals' },
+  instrum: { icon: '🎼', label: 'Instrumental' },
+  instrum2:{ icon: '🎵', label: 'Instrumental (bass+drums+other)' },
+  drums:   { icon: '🥁', label: 'Drums' },
+  bass:    { icon: '🎸', label: 'Bass' },
+  guitar:  { icon: '🪕', label: 'Guitar' },
+  other:   { icon: '🎵', label: 'Other' },
+  piano:   { icon: '🎹', label: 'Piano' },
+};
+
+// ── DOM refs ───────────────────────────────────────────────────────────────
+const dropZone    = document.getElementById('drop-zone');
+const fileInput   = document.getElementById('file-input');
+const fileNameEl  = document.getElementById('file-name');
+const btn6stem    = document.getElementById('btn-6stem');
+const btn2stem    = document.getElementById('btn-2stem');
+const btn4stem    = document.getElementById('btn-4stem');
+const cpuCheck    = document.getElementById('cpu-check');
+const advToggle   = document.getElementById('adv-toggle');
+const advPanel    = document.getElementById('advanced-panel');
+const submitBtn   = document.getElementById('submit-btn');
+const uploadCard  = document.getElementById('upload-card');
+const progressCard= document.getElementById('progress-card');
+const resultsCard = document.getElementById('results-card');
+const stageLabel  = document.getElementById('stage-label');
+const stageSub    = document.getElementById('stage-sub');
+const progBar     = document.getElementById('prog-bar');
+const logToggle   = document.getElementById('log-toggle');
+const logArea     = document.getElementById('log-area');
+const stemButtons = document.getElementById('stem-buttons');
+const resetBtn    = document.getElementById('reset-btn');
+const bigShiftsSlider = document.getElementById('BigShifts');
+const bigShiftsVal    = document.getElementById('BigShifts-val');
+const inputGainSlider = document.getElementById('input_gain');
+const inputGainVal    = document.getElementById('input_gain-val');
+const shareRow     = document.getElementById('share-row');
+const shareUrlEl   = document.getElementById('share-url');
+const copyBtn      = document.getElementById('copy-btn');
+const shareBtn     = document.getElementById('share-btn');
+const resultsHint  = document.getElementById('results-hint');
+
+// ── File selection ─────────────────────────────────────────────────────────
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => setFile(fileInput.files[0]));
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) setFile(e.dataTransfer.files[0]);
+});
+
+function setFile(f) {
+  selectedFile = f;
+  fileNameEl.textContent = f ? f.name : '';
+  submitBtn.disabled = !f;
+}
+
+// ── Mode toggle ────────────────────────────────────────────────────────────
+[btn6stem, btn2stem, btn4stem].forEach(btn => btn.addEventListener('click', () => {
+  btn6stem.classList.toggle('active', btn === btn6stem);
+  btn2stem.classList.toggle('active', btn === btn2stem);
+  btn4stem.classList.toggle('active', btn === btn4stem);
+  use6stem  = (btn === btn6stem);
+  vocalsOnly = (btn === btn2stem);
+  advPanel.classList.toggle('six-stem-active', use6stem);
+}));
+
+// ── Advanced toggle ────────────────────────────────────────────────────────
+advToggle.addEventListener('click', () => {
+  advToggle.classList.toggle('open');
+  advPanel.classList.toggle('open');
+});
+
+// ── Sliders ────────────────────────────────────────────────────────────────
+bigShiftsSlider.addEventListener('input', () => {
+  bigShiftsVal.textContent = bigShiftsSlider.value;
+});
+inputGainSlider.addEventListener('input', () => {
+  inputGainVal.textContent = inputGainSlider.value + ' dB';
+});
+
+// ── Log toggle ─────────────────────────────────────────────────────────────
+logToggle.addEventListener('click', () => {
+  const open = logArea.classList.toggle('open');
+  logToggle.textContent = (open ? '▾' : '▸') + ' Show log';
+});
+
+// ── Submit ─────────────────────────────────────────────────────────────────
+submitBtn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+
+  const opts = {
+    cpu:                  cpuCheck.checked,
+    use_BSRoformer6Stem:  use6stem,
+    vocals_only:          vocalsOnly,
+    BigShifts:            parseInt(bigShiftsSlider.value),
+    use_BSRoformer:       document.getElementById('use_BSRoformer').checked,
+    use_Kim_MelRoformer: document.getElementById('use_Kim_MelRoformer').checked,
+    use_InstVoc:      document.getElementById('use_InstVoc').checked,
+    use_VitLarge:     document.getElementById('use_VitLarge').checked,
+    use_VOCFT:        document.getElementById('use_VOCFT').checked,
+    use_InstHQ4:      document.getElementById('use_InstHQ4').checked,
+    weight_BSRoformer:      parseFloat(document.getElementById('weight_BSRoformer').value),
+    weight_Kim_MelRoformer: parseFloat(document.getElementById('weight_Kim_MelRoformer').value),
+    weight_InstVoc:   parseFloat(document.getElementById('weight_InstVoc').value),
+    weight_VitLarge:  parseFloat(document.getElementById('weight_VitLarge').value),
+    weight_VOCFT:     parseFloat(document.getElementById('weight_VOCFT').value),
+    weight_InstHQ4:   parseFloat(document.getElementById('weight_InstHQ4').value),
+    output_format:    document.getElementById('output_format').value,
+    input_gain:       parseInt(inputGainSlider.value),
+    restore_gain:     document.getElementById('restore_gain').checked,
+    filter_vocals:    document.getElementById('filter_vocals').checked,
+  };
+
+  const fd = new FormData();
+  fd.append('file', selectedFile);
+  fd.append('options', JSON.stringify(opts));
+
+  submitBtn.disabled = true;
+  uploadCard.classList.add('hidden');
+  progressCard.classList.remove('hidden');
+  stageLabel.textContent = 'Starting…';
+  stageSub.textContent = '';
+  setPulsing();
+  logArea.textContent = '';
+
+  abortController = new AbortController();
+  try {
+    const resp = await fetch('/api/separate', {
+      method: 'POST', body: fd, signal: abortController.signal,
+    });
+    if (!resp.ok) { showError('Server error: ' + resp.statusText); return; }
+    await readSSEStream(resp.body, opts);
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      const msg = e.message?.includes('Load failed') || e.message?.includes('fetch')
+        ? 'Connection dropped — the server may be starting up. Click Separate to try again.'
+        : String(e);
+      showError(msg);
+    }
+  }
+});
+
+// ── Stream reading ─────────────────────────────────────────────────────────
+let enabledModels = [];
+let totalSteps = 0;
+let completedSteps = 0;
+
+const DEMUCS_MODELS = ['htdemucs_ft', 'htdemucs', 'htdemucs_6s', 'hdemucs_mmi'];
+
+function setPulsing(sub) {
+  progBar.classList.add('pulsing');
+  progBar.style.width = '';
+  if (sub !== undefined) stageSub.textContent = sub;
+}
+
+function setShiftProgress(n, total) {
+  progBar.classList.remove('pulsing');
+  progBar.style.width = (total > 0 ? Math.round((n / total) * 100) : 0) + '%';
+  stageSub.textContent = `Shift ${n} of ${total}`;
+}
+
+async function readSSEStream(body, opts) {
+  if (opts.use_BSRoformer6Stem) {
+    enabledModels = [];
+    totalSteps = 1;
+  } else {
+    const ALL_VOCAL = ['BSRoformer','Kim_MelRoformer','InstVoc','VitLarge','VOCFT','InstHQ4'];
+    enabledModels = ALL_VOCAL.filter(m => opts[`use_${m}`]);
+    totalSteps = enabledModels.length + (opts.vocals_only ? 0 : DEMUCS_MODELS.length);
+  }
+  completedSteps = 0;
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      try {
+        handleMessage(JSON.parse(line.slice(6)));
+      } catch (_) {}
+    }
+  }
+}
+
+function handleMessage(msg) {
+  if (msg.type === 'log') {
+    updateStageFromLog(msg.message);
+    appendLog(msg.message);
+  } else if (msg.type === 'progress') {
+    setShiftProgress(msg.n, msg.total);
+  } else if (msg.type === 'done') {
+    progBar.classList.remove('pulsing');
+    progBar.style.width = '100%';
+    stageSub.textContent = '';
+    showResults(msg.files);
+  } else if (msg.type === 'error') {
+    showError(msg.message);
+  }
+}
+
+function updateStageFromLog(text) {
+  const t = text.trim();
+
+  if (t.includes('Processing with BSRoformer6Stem')) {
+    stageLabel.textContent = 'Processing 6-stem separation…';
+    setPulsing('Running shift-averaging…');
+    return;
+  }
+  if (t.includes('Loading BSRoformer6Stem')) {
+    stageLabel.textContent = 'Loading 6-stem model…';
+    setPulsing('This may take a moment on first run');
+    return;
+  }
+
+  const mVocal = t.match(/Processing vocals with (\S+) model/);
+  if (mVocal) {
+    const name = mVocal[1];
+    const idx = enabledModels.indexOf(name);
+    if (idx >= 0) completedSteps = idx;
+    const ofN = enabledModels.length > 1 ? ` — model ${idx + 1} of ${enabledModels.length}` : '';
+    stageLabel.textContent = `Processing with ${name}${ofN}`;
+    setPulsing('Preparing shifts…');
+    return;
+  }
+
+  if (t.includes('Processing vocals: DONE')) {
+    completedSteps = enabledModels.length;
+    stageLabel.textContent = 'Vocals done — decomposing stems…';
+    setPulsing('');
+    return;
+  }
+
+  const mDemucs = t.match(/Processing with (htdemucs\S*|hdemucs\S*)/);
+  if (mDemucs) {
+    const name = mDemucs[1];
+    const dIdx = DEMUCS_MODELS.indexOf(name);
+    completedSteps = enabledModels.length + (dIdx >= 0 ? dIdx : 0);
+    stageLabel.textContent = `Demucs: ${name} (${dIdx + 1} of ${DEMUCS_MODELS.length})`;
+    setPulsing('Preparing shifts…');
+    return;
+  }
+
+  const mLoad = t.match(/Loading (\S+) into memory/);
+  if (mLoad) {
+    stageLabel.textContent = `Loading ${mLoad[1]}…`;
+    setPulsing('This may take a moment on first run');
+  }
+}
+
+function appendLog(text) {
+  logArea.textContent += text + '\n';
+  logArea.scrollTop = logArea.scrollHeight;
+}
+
+// ── Results ────────────────────────────────────────────────────────────────
+const HIDE = new Set(['instrum2']);
+const ORDER = ['vocals','bass','drums','guitar','piano','other','instrum'];
+
+function showResults(files, fromShare = false) {
+  blobUrls.forEach(u => URL.revokeObjectURL(u));
+  blobUrls = [];
+  progressCard.classList.add('hidden');
+  resultsCard.classList.remove('hidden');
+  stemButtons.innerHTML = '';
+  shareRow.classList.add('hidden');
+
+  if (fromShare) {
+    currentFilesB64 = null;
+    shareBtn.classList.add('hidden');
+    resultsHint.classList.add('hidden');
+  } else {
+    currentFilesB64 = files;
+    shareBtn.classList.remove('hidden');
+    shareBtn.disabled = false;
+    shareBtn.textContent = 'Create shareable link';
+    resultsHint.classList.remove('hidden');
+  }
+
+  const sorted = Object.keys(files)
+    .filter(f => {
+      const stem = f.replace(/\.\w+$/, '').split('_').pop();
+      return !HIDE.has(stem);
+    })
+    .sort((a, b) => {
+      const sa = a.replace(/\.\w+$/, '').split('_').pop();
+      const sb = b.replace(/\.\w+$/, '').split('_').pop();
+      return (ORDER.indexOf(sa) + 1 || 99) - (ORDER.indexOf(sb) + 1 || 99);
+    });
+
+  sorted.forEach(fname => {
+    const stem = fname.replace(/\.\w+$/, '').split('_').pop();
+    const info = MODEL_ICONS[stem] || { icon: '🎵', label: stem };
+    let url;
+    if (fromShare) {
+      url = files[fname];
+    } else {
+      const mime = fname.endsWith('.mp3') ? 'audio/mpeg' : 'audio/flac';
+      const bytes = Uint8Array.from(atob(files[fname]), c => c.charCodeAt(0));
+      url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+      blobUrls.push(url);
+    }
+    stemButtons.appendChild(buildStemCard(info, url, fname));
+  });
+}
+
+function buildStemCard(info, url, fname) {
+  const card = document.createElement('div');
+  card.className = 'stem-card';
+  card.innerHTML = `
+    <div class="stem-header">
+      <span class="stem-icon">${info.icon}</span>
+      <span class="stem-name">${info.label}</span>
+      <a class="dl-btn" href="${url}" download="${fname}" title="Download">⬇</a>
+    </div>
+    <audio class="stem-audio" preload="none" src="${url}"></audio>
+    <div class="stem-player">
+      <button class="play-btn" aria-label="Play">▶</button>
+      <div class="seek-bg"><div class="seek-fill"></div></div>
+      <span class="time-disp">0:00</span>
+    </div>
+  `;
+  const audio = card.querySelector('.stem-audio');
+  const playBtn = card.querySelector('.play-btn');
+  const seekBg = card.querySelector('.seek-bg');
+  const seekFill = card.querySelector('.seek-fill');
+  const timeDisp = card.querySelector('.time-disp');
+
+  playBtn.addEventListener('click', () => {
+    if (audio.paused) {
+      pauseAll();
+      audio.play();
+      playBtn.textContent = '⏸';
+      playBtn.classList.add('playing');
+    } else {
+      audio.pause();
+      playBtn.textContent = '▶';
+      playBtn.classList.remove('playing');
+    }
+  });
+  audio.addEventListener('timeupdate', () => {
+    const pct = audio.duration ? (audio.currentTime / audio.duration) * 100 : 0;
+    seekFill.style.width = pct + '%';
+    timeDisp.textContent = fmt(audio.currentTime);
+  });
+  audio.addEventListener('ended', () => {
+    playBtn.textContent = '▶';
+    playBtn.classList.remove('playing');
+  });
+  seekBg.addEventListener('click', e => {
+    if (!audio.duration) return;
+    audio.currentTime = (e.offsetX / seekBg.offsetWidth) * audio.duration;
+  });
+  return card;
+}
+
+function pauseAll() {
+  document.querySelectorAll('.stem-audio').forEach(a => {
+    a.pause();
+    const btn = a.closest('.stem-card').querySelector('.play-btn');
+    btn.textContent = '▶';
+    btn.classList.remove('playing');
+  });
+}
+
+function fmt(s) {
+  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+  return `${m}:${sec.toString().padStart(2, '0')}`;
+}
+
+// ── Create share link ──────────────────────────────────────────────────────
+shareBtn.addEventListener('click', async () => {
+  if (!currentFilesB64) return;
+  shareBtn.disabled = true;
+  shareBtn.textContent = 'Uploading…';
+  try {
+    const resp = await fetch('/api/share', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files: currentFilesB64 }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const { uuid } = await resp.json();
+    const shareUrl = `${location.origin}/result/${uuid}`;
+    shareUrlEl.value = shareUrl;
+    shareRow.classList.remove('hidden');
+    shareBtn.classList.add('hidden');
+    resultsHint.classList.add('hidden');
+  } catch (e) {
+    shareBtn.disabled = false;
+    shareBtn.textContent = 'Create shareable link';
+    shareBtn.style.borderColor = 'var(--red)';
+    shareBtn.style.color = 'var(--red)';
+    shareBtn.title = String(e);
+  }
+});
+
+// ── Copy share link ────────────────────────────────────────────────────────
+copyBtn.addEventListener('click', () => {
+  navigator.clipboard.writeText(shareUrlEl.value).then(() => {
+    const orig = copyBtn.textContent;
+    copyBtn.textContent = 'Copied!';
+    setTimeout(() => { copyBtn.textContent = orig; }, 1500);
+  });
+});
+
+// ── Error ──────────────────────────────────────────────────────────────────
+function showError(msg) {
+  progressCard.classList.add('hidden');
+  uploadCard.classList.remove('hidden');
+  // keep selectedFile so the user can retry without re-uploading
+  submitBtn.disabled = !selectedFile;
+
+  const existing = uploadCard.querySelector('.error-box');
+  if (existing) existing.remove();
+
+  const box = document.createElement('div');
+  box.className = 'error-box';
+  box.textContent = msg;
+  uploadCard.prepend(box);
+}
+
+// ── Reset ──────────────────────────────────────────────────────────────────
+resetBtn.addEventListener('click', () => {
+  if (abortController) { abortController.abort(); abortController = null; }
+  blobUrls.forEach(u => URL.revokeObjectURL(u));
+  blobUrls = [];
+  selectedFile = null;
+  fileNameEl.textContent = '';
+  submitBtn.disabled = true;
+  fileInput.value = '';
+  setPulsing('');
+  stageSub.textContent = '';
+  logArea.textContent = '';
+  logArea.classList.remove('open');
+  shareRow.classList.add('hidden');
+  shareUrlEl.value = '';
+  shareBtn.classList.add('hidden');
+  shareBtn.disabled = false;
+  shareBtn.textContent = 'Create shareable link';
+  shareBtn.style.borderColor = '';
+  shareBtn.style.color = '';
+  resultsHint.classList.add('hidden');
+  currentFilesB64 = null;
+
+  resultsCard.classList.add('hidden');
+  progressCard.classList.add('hidden');
+  uploadCard.classList.remove('hidden');
+
+  const box = uploadCard.querySelector('.error-box');
+  if (box) box.remove();
+});
+
+// ── Load shared result from /result/<uuid> ────────────────────────────────
+(async () => {
+  const pathMatch = location.pathname.match(/\/result\/([^/]+)/);
+  const uuid = pathMatch ? pathMatch[1] : null;
+  if (!uuid) return;
+  uploadCard.classList.add('hidden');
+  progressCard.classList.remove('hidden');
+  stageLabel.textContent = 'Loading shared stems…';
+  try {
+    const resp = await fetch(`/api/result/${uuid}`);
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(`${resp.status} — ${body}`);
+    }
+    const { files } = await resp.json();
+    showResults(files, true);
+    shareUrlEl.value = location.href;
+    shareRow.classList.remove('hidden');
+  } catch (e) {
+    showError('Could not load shared result: ' + e.message);
+  }
+})();
+</script>
+</body>
+</html>

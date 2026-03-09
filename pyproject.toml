@@ -1,0 +1,53 @@
+[project]
+name = "neiro"
+version = "2.5.1"
+requires-python = ">=3.11, <3.14"
+dependencies = [
+    "numpy",
+    "soundfile",
+    "scipy",
+    "tqdm",
+    "librosa",
+    "demucs",
+    "pyyaml",
+    "ml-collections",
+    "samplerate>=0.1.0",
+    "segmentation-models-pytorch==0.3.3",
+    "six",  # undeclared dep of pretrainedmodels (pulled in by segmentation-models-pytorch)
+    "beartype==0.14.1",
+    "rotary-embedding-torch==0.3.5",
+    "torch",
+    "torchaudio",
+    # onnxruntime-gpu has no macOS wheels; use CPU fallback for local dev
+    "onnxruntime-gpu; sys_platform != 'darwin'",
+    "onnxruntime; sys_platform == 'darwin'",
+]
+
+[tool.uv]
+# Use uv-managed Python so the version is consistent across machines
+python-preference = "managed"
+
+[tool.uv.sources]
+# On Linux, pull torch/torchaudio from the PyTorch CUDA 12.4 index.
+# Change cu124 → cu118 if your driver only supports CUDA 11.8.
+torch = [
+    { index = "pytorch-cu124", marker = "sys_platform == 'linux'" },
+]
+torchaudio = [
+    { index = "pytorch-cu124", marker = "sys_platform == 'linux'" },
+]
+
+[project.optional-dependencies]
+web = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "modal",
+    "boto3",
+    "python-dotenv",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
