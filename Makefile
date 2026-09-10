@@ -1,4 +1,4 @@
-.PHONY: setup sync run web deploy clean help
+.PHONY: setup sync run web deploy clean help yt-cookies
 
 # Default target
 help:
@@ -33,6 +33,13 @@ web: ## Run local dev server on :8000
 
 deploy: ## Deploy to Modal (GPU)
 	uv run modal deploy modal_app.py
+
+# Usage: make yt-cookies FILE=~/.neiro-yt-cookies.txt
+FILE ?= $(HOME)/.neiro-yt-cookies.txt
+
+yt-cookies: ## Push a freshly-exported cookies.txt to the Modal yt-cookies secret
+	@test -s "$(FILE)" || { echo "No cookies file at $(FILE) — export one first (see app.py's _YT_COOKIES_HELP)"; exit 1; }
+	uv run modal secret create yt-cookies YT_COOKIES_CONTENT="$$(cat $(FILE))" --force
 
 clean: ## Remove .venv, __pycache__, output/
 	rm -rf .venv __pycache__ output/ out/

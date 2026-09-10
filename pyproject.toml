@@ -45,6 +45,7 @@ web = [
     "modal",
     "boto3",
     "python-dotenv",
+    "yt-dlp[default]",
 ]
 
 [[tool.uv.index]]

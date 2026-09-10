@@ -4,83 +4,109 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-MVSep-MDX23 Colab Fork v2.5 — a music source separation tool that separates audio into vocals, instrumental, bass, drums, and other stems using a weighted ensemble of deep learning models.
+Neiro is a music source separation web app. It wraps an ensemble deep-learning separation
+pipeline (adapted from MVSep-MDX23) behind a FastAPI backend and a single-page vanilla-JS
+frontend, with two deployment targets: a local CPU dev server and a Modal-hosted GPU service.
+The separation pipeline itself (`inference.py`, `modules/`) is a vendored fork — treat it as
+mostly stable library code; day-to-day work happens in `app.py`, `modal_app.py`, and
+`static/index.html`.
 
-## Running Inference
+## Commands
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Vocals + instrumental only (faster)
-python inference.py \
-  --input_audio song.wav \
-  --output_folder ./output \
-  --vocals_only \
-  --use_BSRoformer --use_Kim_MelRoformer --use_InstVoc \
-  --weight_BSRoformer 9.18 --weight_Kim_MelRoformer 10 --weight_InstVoc 3.39 \
-  --BigShifts 3
-
-# 4-stem separation (vocals/bass/drums/other)
-python inference.py \
-  --input_audio song.wav \
-  --output_folder ./output \
-  --use_BSRoformer --use_Kim_MelRoformer --use_InstVoc
-
-# Batch processing a folder (use --large_gpu to keep models in VRAM)
-python inference.py \
-  --input_audio /path/to/folder/*.wav \
-  --output_folder ./output \
-  --vocals_only --large_gpu \
-  --use_BSRoformer --use_Kim_MelRoformer --use_InstVoc
+make setup    # uv sync --extra web — installs deps into .venv
+make web      # uv run uvicorn app:app --reload --port 8000 — local CPU dev server
+make deploy   # uv run modal deploy modal_app.py — deploy full stack to Modal (GPU)
+make run INPUT=song.mp3 [OUTPUT=./output] [CPU=1]   # CLI separation via inference.py
+make clean    # remove .venv, __pycache__, output/
 ```
 
-Key CLI flags:
-- `--large_gpu` — keep all models loaded in GPU memory (requires ~11GB VRAM), faster for batches
-- `--cpu` — force CPU inference (very slow)
-- `--BigShifts N` — number of shift-average passes (1=off, 3–11=typical; higher = slower but potentially better)
-- `--output_format` — `PCM_16`, `FLOAT`, or `FLAC`
-- `--filter_vocals` — highpass filter below 50Hz on vocals stem
-- `--input_gain` / `--restore_gain` — adjust input volume and restore after separation
+There is no test suite or linter configured in this repo.
+
+Direct inference invocation (bypassing the web layer):
+
+```bash
+uv run python inference.py \
+  --input_audio song.mp3 --output_folder ./output \
+  --use_BSRoformer --use_Kim_MelRoformer --use_InstVoc \
+  --weight_BSRoformer 9.18 --weight_Kim_MelRoformer 10 --weight_InstVoc 3.39 \
+  --BigShifts 3 --vocals_only
+```
+
+Key `inference.py` flags: `--large_gpu` (keep all models resident in VRAM), `--cpu` (force CPU,
+slow), `--BigShifts N` (shift-average passes, 1=off/3–11=typical), `--output_format`
+(`PCM_16`/`FLOAT`/`FLAC`), `--filter_vocals`, `--input_gain`/`--restore_gain`.
 
 ## Architecture
 
+### Two parallel FastAPI apps, one shared contract
+
+`app.py` (local) and the `fastapi_app` closure inside `modal_app.py` (Modal) are **independent,
+duplicated implementations** of the same API surface (`/`, `/api/separate`, `/api/youtube`,
+`/api/share`, `/api/result/{job_id}`, `/api/audio-proxy`, R2 helpers, `DEFAULTS` dict). They are
+not imported from a shared module — when changing request/response shapes, defaults, or
+endpoint behavior, **update both files**. `app.py`'s Modal GPU path calls into `modal_app.py`'s
+`separate` function via `ma.separate.remote_gen.aio(...)`; its CPU path calls `inference.py`
+directly in a background thread.
+
+### Request flow
+
+1. Client uploads audio (or a YouTube URL, downloaded server-side via `yt-dlp` into an mp3) to
+   `POST /api/separate` with a JSON `options` blob merged onto `DEFAULTS`.
+2. **CPU path** (`app.py`, `cpu: true`): runs `inference.predict_with_model` in a background
+   thread; `print` and `tqdm` are monkey-patched to push `{type: log|progress}` messages onto an
+   `asyncio.Queue`, drained as SSE.
+3. **GPU path**: `app.py` proxies to the Modal `separate` function (an `@app.function(gpu="H100")`
+   generator); `modal_app.py`'s own `fastapi_app` does the equivalent locally when deployed. The
+   generator yields `log`/`progress`/`result`/`error` dict messages; results are FLAC-encoded and
+   base64'd, then re-encoded to MP3 for browser playback.
+4. Model checkpoints live on a Modal `Volume` (`mvsep-models`) so they persist across container
+   cold starts; `model_volume.commit()` is called after each run.
+5. `POST /api/share` uploads the finished stems to Cloudflare R2 under `results/{uuid}/`, with a
+   `manifest.json` listing filenames; `GET /api/result/{job_id}` returns presigned GET URLs
+   (24h expiry). R2 is optional — configured via `.env` locally (`cp .env.example .env`) or a
+   `cloudflare-r2` Modal secret in production; share links silently unavailable if unset.
+6. YouTube ingestion (`/api/youtube`) shells out to `yt_dlp` as a subprocess (needs Node ≥20 for
+   the JS challenge solver), strips "(Official Video)"-style junk from titles, and requires
+   either a cookies file (`YOUTUBE_COOKIES_FILE` env var or `~/.neiro-yt-cookies.txt`) or
+   `--cookies-from-browser` to get past bot checks.
+
 ### Separation pipeline (`inference.py`)
 
-`EnsembleDemucsMDXMusicSeparationModel` orchestrates the full pipeline:
+`EnsembleDemucsMDXMusicSeparationModel` orchestrates:
 
-1. **Vocals ensemble** — weighted average of up to 6 model outputs:
-   - `BSRoformer` / `Kim_MelRoformer` — PyTorch transformer models (`.ckpt` + `.yaml`)
-   - `InstVoc` (MDXv3 / TFC_TDF_net) — PyTorch model
-   - `VitLarge` (Segm_Models_Net) — PyTorch model
-   - `VOCFT` / `InstHQ4` — ONNX models via `onnxruntime`
+1. **Vocals ensemble** — weighted average of up to 6 models: `BSRoformer` / `Kim_MelRoformer`
+   (PyTorch transformers, `.ckpt`+`.yaml`), `InstVoc` (MDXv3/TFC_TDF_net), `VitLarge`
+   (Segm_Models_Net), `VOCFT`/`InstHQ4` (ONNX via `onnxruntime`).
+2. **Instrumental** — computed as `mix - vocals`.
+3. **4-stem decomposition** (bass/drums/other) — ensemble of 4 Demucs models (`htdemucs_ft`,
+   `htdemucs`, `htdemucs_6s`, `hdemucs_mmi`) applied to the instrumental.
 
-2. **Instrumental** — computed as `mix - vocals`
+Models download automatically on first use and cache in `models/`; loading is lazy
+(`initialize_model_if_needed`) and models offload from GPU after use unless `--large_gpu`.
+`demix_new`/`demix_new_wrapper` handle chunked inference + BigShifts shift-averaging for the
+transformer models; `demix`/`demix_wrapper` handle ONNX-based chunked inference for MDX models;
+`lr_filter` is the Linkwitz-Riley crossover used when blending VOCFT's high/low bands.
 
-3. **4-stem decomposition** (bass/drums/other) — ensemble of 4 Demucs models (`htdemucs_ft`, `htdemucs`, `htdemucs_6s`, `hdemucs_mmi`) applied to the instrumental
+Custom model modules live in `modules/`: `bs_roformer/bs_roformer.py`,
+`bs_roformer/mel_band_roformer.py`, `tfc_tdf_v3.py` (MDXv3/InstVoc), `tfc_tdf_v2.py`
+(MDXv2/VOCFT/InstHQ4), `segm_models.py` (VitLarge).
 
-### Model loading
+### Modal deployment split
 
-Models are downloaded automatically on first use (via `torch.hub` / direct URLs) and cached in `models/`. Loading is lazy (`initialize_model_if_needed`) and models are offloaded from GPU after use unless `--large_gpu` is set.
+`modal_app.py` builds two separate images: `gpu_image` (heavy ML deps, `modules/` +
+`inference.py` baked in, runs `separate` on an H100) and `web_image` (lightweight — FastAPI,
+boto3, yt-dlp + Node 20 — serves `static/`). Keep heavy dependencies out of `web_image` and
+web-only dependencies out of `gpu_image`.
 
-### Key demixing functions
+### Frontend
 
-- `demix_new` / `demix_new_wrapper` — chunked inference with fade windows for BSRoformer/MelRoformer/InstVoc/VitLarge; wrapper adds BigShifts shift-average
-- `demix` / `demix_wrapper` — ONNX-based chunked inference for MDX models (VOCFT, InstHQ4)
-- `lr_filter` — Linkwitz-Riley crossover filter used for high/low band blending when VOCFT is enabled
+`static/index.html` is a single-file vanilla-JS SPA (Gruvbox dark theme) — no build step. It
+POSTs to `/api/separate`, consumes the SSE stream for live progress/log updates, plays stems
+inline, and calls `/api/share` for shareable R2 links.
 
-### Custom model modules (`modules/`)
+## Known open issues (`fixes.md`)
 
-- `bs_roformer/bs_roformer.py` — BSRoformer transformer
-- `bs_roformer/mel_band_roformer.py` — MelBandRoformer (Kim's model)
-- `tfc_tdf_v3.py` — TFC-TDF network (MDXv3 / InstVoc)
-- `tfc_tdf_v2.py` — TFC-TDF network (MDXv2 / VOCFT, InstHQ4)
-- `segm_models.py` — VitLarge segmentation model wrapper
-
-### Model configs (`models/`)
-
-YAML configs define audio processing parameters (sample rate, FFT settings, chunk sizes) and model architecture. Downloaded automatically alongside checkpoints.
-
-## Colab Usage
-
-Open `MVSep-MDX23-Colab.ipynb` in Google Colab. The notebook installs dependencies, mounts Google Drive, and exposes all separation options as form widgets that map directly to `inference.py` CLI arguments.
+Karaoke/lyric-sync UX has known rough edges: auto-scroll on lyric click, choppy "include
+vocals" playback, vocals not time-synced, and no ability to queue a second song while karaoke
+is active on the current one.

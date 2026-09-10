@@ -26,6 +26,7 @@
 
     /* ── Reset & base ───────────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    .hidden { display: none !important; }
 
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -297,6 +298,18 @@
 
     /* ── Results card ────────────────────────────────────────────────────── */
     .results-title { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; }
+    .stems-details { margin-top: 1.1rem; }
+    .stems-details summary {
+      cursor: pointer; font-size: .8rem; color: var(--muted);
+      list-style: none; user-select: none;
+      display: inline-flex; align-items: center; gap: .35rem;
+      transition: color .15s;
+    }
+    .stems-details summary::-webkit-details-marker { display: none; }
+    .stems-details summary::before { content: '▸'; font-size: .7rem; }
+    .stems-details[open] summary::before { content: '▾'; }
+    .stems-details summary:hover { color: var(--text); }
+    .stems-details .stem-buttons { margin-top: .75rem; }
     .stem-buttons { display: flex; flex-direction: column; gap: .5rem; }
 
     /* ── Stem card (replaces .stem-btn) ─────────────────────────────────── */
@@ -401,17 +414,585 @@
       margin-bottom: 1rem;
       white-space: pre-wrap;
     }
+
+    /* ── Karaoke mode ─────────────────────────────────────────────────────── */
+    .mode-btn.karaoke-active {
+      border-color: var(--purple);
+      background: rgba(211,134,155,.1);
+      color: var(--purple);
+    }
+
+    .meta-row { display: flex; gap: .75rem; margin-top: .85rem; }
+    .meta-field { flex: 1; }
+    .meta-label { display: block; font-size: .72rem; color: var(--muted); margin-bottom: .25rem; }
+    .meta-input {
+      width: 100%;
+      padding: .4rem .6rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface2);
+      color: var(--text);
+      font-size: .875rem;
+    }
+    .meta-input:focus { outline: none; border-color: var(--purple); }
+    .meta-hint { font-size: .72rem; color: var(--muted); margin-top: .4rem; }
+
+    /* ── YouTube URL input ───────────────────────────────────────────────── */
+    .yt-divider {
+      display: flex; align-items: center; gap: .6rem;
+      margin: .9rem 0 .75rem; color: var(--muted); font-size: .8rem;
+    }
+    .yt-divider::before, .yt-divider::after {
+      content: ''; flex: 1; height: 1px; background: var(--border);
+    }
+    #yt-row { display: flex; gap: .5rem; }
+    #yt-url { flex: 1; } /* reuses .meta-input */
+    #yt-btn {
+      padding: .4rem .85rem; background: transparent;
+      border: 1.5px solid var(--border); border-radius: 6px;
+      color: var(--muted); font-size: .875rem; cursor: pointer;
+      white-space: nowrap; transition: border-color .15s, color .15s;
+    }
+    #yt-btn:hover:not(:disabled) { border-color: var(--green); color: var(--green); }
+    #yt-btn:disabled { opacity: .5; cursor: not-allowed; }
+    #yt-status { font-size: .75rem; color: var(--muted); min-height: 1.2em; margin-top: .35rem; }
+
+    #karaoke-start-btn {
+      display: block; width: 100%; margin-top: 1.5rem; padding: .85rem;
+      background: var(--purple); color: var(--bg);
+      border: none; border-radius: 8px; font-size: 1rem; font-weight: 600;
+      cursor: pointer; transition: background .15s;
+    }
+    #karaoke-start-btn:hover:not(:disabled) { background: var(--purple-dk); }
+    #karaoke-start-btn:disabled { opacity: .55; cursor: not-allowed; }
+
+    /* ── Karaoke player card ──────────────────────────────────────────────── */
+    #karaoke-player-card { padding: 0; overflow: hidden; }
+
+    .kp-header { padding: 1.25rem 1.75rem .75rem; border-bottom: 1px solid var(--border); }
+    .kp-title  { font-size: 1rem; font-weight: 600; }
+    .kp-artist { font-size: .8rem; color: var(--muted); margin-top: .15rem; }
+
+    .kp-transport {
+      display: flex; align-items: center; gap: .75rem;
+      padding: .75rem 1.75rem; border-bottom: 1px solid var(--border);
+    }
+    .kp-play-btn {
+      width: 36px; height: 36px; border-radius: 50%;
+      border: 2px solid var(--purple); background: transparent; color: var(--purple);
+      font-size: .9rem; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0; transition: background .15s, color .15s;
+    }
+    .kp-play-btn:hover, .kp-play-btn.playing { background: var(--purple); color: var(--bg); }
+    .kp-seek-bg {
+      flex: 1; height: 5px; background: var(--border);
+      border-radius: 99px; cursor: pointer; position: relative;
+    }
+    .kp-seek-fill {
+      height: 100%; background: var(--purple); border-radius: 99px;
+      width: 0%; pointer-events: none;
+    }
+    .kp-time { font-size: .75rem; color: var(--muted); white-space: nowrap; min-width: 84px; text-align: right; }
+
+    .kp-vocals-row {
+      display: flex; align-items: center; gap: .5rem;
+      padding: .55rem 1.75rem; border-bottom: 1px solid var(--border);
+      font-size: .82rem;
+    }
+    .kp-vocals-row input[type=checkbox] { accent-color: var(--purple); width: 15px; height: 15px; cursor: pointer; }
+    .kp-vocals-row label { cursor: pointer; }
+    .kp-vocals-hint { font-size: .72rem; color: var(--muted); }
+
+    .kp-lyrics {
+      height: 320px; overflow-y: auto;
+      padding: .25rem 1.75rem;
+    }
+    .kp-lyrics-spacer { height: 100px; }
+    .lyric-line {
+      padding: .4rem 0; font-size: .95rem; color: var(--muted);
+      cursor: pointer; line-height: 1.5; transition: color .15s;
+    }
+    .lyric-line:hover { color: var(--text); }
+    .lyric-line.active { color: var(--purple); font-size: 1.05rem; font-weight: 600; }
+    .lyric-line.past   { color: var(--surface2); }
+    .lyrics-notice { color: var(--muted); font-size: .85rem; text-align: center; padding: 2rem 0; }
+
+    .kp-actions {
+      display: flex; gap: .5rem;
+      padding: .75rem 1.75rem 1.25rem; border-top: 1px solid var(--border);
+    }
+    .kp-dl-btn {
+      flex: 1; padding: .5rem; background: transparent;
+      border: 1.5px solid var(--border); border-radius: 8px;
+      color: var(--muted); font-size: .8rem; cursor: pointer;
+      transition: border-color .15s, color .15s; text-align: center; text-decoration: none;
+    }
+    .kp-dl-btn:hover { border-color: var(--purple); color: var(--purple); }
+
+    /* ── Lyrics picker card ─────────────────────────────────────────────── */
+    .lyrics-picker-header {
+      font-size: .9rem; margin-bottom: .85rem;
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: .4rem;
+    }
+    .lyrics-picker-header strong { color: var(--muted); font-weight: 400; }
+    .lyrics-picker-header span { color: var(--text); font-weight: 500; }
+    #lyrics-picker-list { display: flex; flex-direction: column; gap: .5rem; }
+    .lyrics-candidate {
+      display: flex; align-items: center; gap: .75rem;
+      padding: .6rem .75rem; border: 1px solid var(--border);
+      border-radius: 8px; background: var(--surface2); transition: border-color .15s;
+    }
+    .lyrics-candidate:hover { border-color: var(--purple); }
+    .lyrics-candidate.best-match {
+      border-color: var(--green);
+      background: rgba(142,192,124,.07);
+    }
+    .lc-best-badge {
+      font-size: .68rem; padding: .1rem .35rem; border-radius: 4px;
+      background: rgba(142,192,124,.2); color: var(--green); font-weight: 600;
+    }
+    .lc-meta { flex: 1; min-width: 0; }
+    .lc-title { display: block; font-size: .875rem; font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lc-artist { display: block; font-size: .75rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lc-info-row { display: flex; gap: .5rem; align-items: center; margin-top: .15rem; }
+    .lc-dur { font-size: .72rem; color: var(--muted); }
+    .lc-badge {
+      font-size: .68rem; padding: .1rem .35rem; border-radius: 4px;
+      background: rgba(142,192,124,.15); color: var(--green); font-weight: 500;
+    }
+    .lc-badge.plain { background: rgba(168,153,132,.15); color: var(--muted); }
+    .lc-pick-btn {
+      padding: .3rem .65rem; border: 1.5px solid var(--purple); border-radius: 6px;
+      background: transparent; color: var(--purple); font-size: .78rem; cursor: pointer;
+      white-space: nowrap; flex-shrink: 0; transition: background .15s, color .15s;
+    }
+    .lc-pick-btn:hover { background: var(--purple); color: var(--bg); }
+    .lyrics-picker-footer { margin-top: .85rem; }
+    #lyrics-picker-skip {
+      background: transparent; border: none; color: var(--muted);
+      font-size: .8rem; cursor: pointer; padding: .2rem 0; transition: color .15s;
+    }
+    #lyrics-picker-skip:hover { color: var(--text); }
+
+    /* ── Practice card — DAW-style mixer ──────────────────────────────── */
+    .mode-btn.practice-active {
+      border-color: var(--green);
+      background: rgba(142,192,124,.1);
+      color: var(--green);
+    }
+
+    .practice-card {
+      margin-top: 1rem;
+      border-color: rgba(104,157,106,.45);
+      padding: 0;
+      overflow: hidden;
+    }
+
+    /* Transport */
+    .pp-transport {
+      display: flex; align-items: center; gap: .7rem;
+      padding: 1.7rem 1.1rem .8rem;
+      background: rgba(0,0,0,.22);
+      border-bottom: 1px solid var(--border);
+    }
+    .pp-ctrl-btn {
+      width: 34px; height: 34px; border-radius: 8px;
+      border: 1px solid var(--border); background: transparent;
+      color: var(--muted); font-size: .82rem; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0; transition: border-color .15s, color .15s;
+    }
+    .pp-ctrl-btn:hover { border-color: var(--green); color: var(--green); }
+    .pp-ctrl-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .pp-skip-back-btn, .pp-skip-fwd-btn { width: auto; padding: 0 .65rem; font-size: .74rem; font-weight: 600; }
+    .pp-play-btn {
+      width: 44px; height: 44px; border-radius: 50%;
+      border: 2px solid var(--green); background: transparent;
+      color: var(--green); font-size: 1.15rem; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0; transition: background .15s, color .15s;
+    }
+    .pp-play-btn:hover, .pp-play-btn.playing { background: var(--green); color: var(--bg); }
+    .pp-seek-wrap {
+      flex: 1; height: 22px; display: flex; align-items: center;
+      cursor: pointer; position: relative; touch-action: none;
+    }
+    .pp-seek-track {
+      width: 100%; height: 5px; background: var(--border);
+      border-radius: 99px; position: relative; overflow: visible;
+      transition: height .1s;
+    }
+    .pp-seek-wrap:hover .pp-seek-track, .pp-seek-wrap.dragging .pp-seek-track { height: 7px; }
+    .pp-seek-fill {
+      height: 100%; background: var(--green); border-radius: 99px;
+      width: 0%; pointer-events: none;
+    }
+    .pp-seek-thumb {
+      position: absolute; top: 50%; left: 0%;
+      width: 13px; height: 13px; border-radius: 50%;
+      background: var(--green); transform: translate(-50%, -50%) scale(0);
+      pointer-events: none; transition: transform .1s;
+      box-shadow: 0 0 0 3px rgba(142,192,124,.25);
+    }
+    .pp-seek-wrap:hover .pp-seek-thumb, .pp-seek-wrap.dragging .pp-seek-thumb { transform: translate(-50%, -50%) scale(1); }
+    .pp-seek-tooltip {
+      position: absolute; bottom: 100%; margin-bottom: 8px;
+      transform: translateX(-50%);
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 5px; padding: .2rem .45rem;
+      font-size: .68rem; color: var(--text); white-space: nowrap;
+      pointer-events: none; opacity: 0; transition: opacity .1s;
+      font-variant-numeric: tabular-nums;
+    }
+    .pp-seek-wrap:hover .pp-seek-tooltip, .pp-seek-wrap.dragging .pp-seek-tooltip { opacity: 1; }
+    .pp-time {
+      font-size: .7rem; color: var(--muted); white-space: nowrap;
+      min-width: 88px; text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Track section header */
+    .pp-tracks-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: .5rem 1.1rem;
+      border-bottom: 1px solid var(--border);
+      background: rgba(0,0,0,.1);
+    }
+    .pp-tracks-title {
+      font-size: .68rem; font-weight: 700; color: var(--green);
+      text-transform: uppercase; letter-spacing: .1em;
+    }
+    .pp-tracks-hint {
+      font-size: .68rem; color: var(--muted); letter-spacing: .03em;
+    }
+
+    /* Individual track row */
+    .pp-tracks { display: flex; flex-direction: column; }
+    .pp-track {
+      display: flex; align-items: center; gap: .65rem;
+      padding: .6rem 1.1rem;
+      border-bottom: 1px solid rgba(80,73,69,.3);
+      transition: background .12s;
+    }
+    .pp-track:last-child { border-bottom: none; }
+    .pp-track:hover { background: rgba(255,255,255,.025); }
+    .pp-track-icon { font-size: 1.05rem; width: 24px; text-align: center; flex-shrink: 0; }
+    .pp-track-name {
+      font-size: .84rem; font-weight: 500; color: var(--text);
+      width: 58px; flex-shrink: 0;
+    }
+
+    /* Solo / Mute buttons */
+    .pp-solo-btn, .pp-mute-btn {
+      width: 34px; height: 30px; border-radius: 7px;
+      border: 1px solid var(--border); background: transparent;
+      font-size: .68rem; font-weight: 700;
+      cursor: pointer; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      transition: background .12s, border-color .12s, color .12s;
+    }
+    .pp-solo-btn { color: var(--amber); }
+    .pp-solo-btn:hover { border-color: var(--amber); }
+    .pp-solo-btn.active { background: var(--amber); color: var(--bg); border-color: var(--amber); }
+    .pp-mute-btn { color: var(--muted); }
+    .pp-mute-btn:hover { border-color: var(--red); color: var(--red); }
+    .pp-mute-btn.active { background: var(--red); color: #fff; border-color: var(--red); }
+
+    /* Volume fader */
+    .pp-fader-wrap {
+      flex: 1; height: 30px; display: flex; align-items: center;
+      cursor: pointer; position: relative; touch-action: none;
+    }
+    .pp-fader-track {
+      width: 100%; height: 4px; background: var(--border);
+      border-radius: 99px; position: relative;
+    }
+    .pp-fader-fill {
+      position: absolute; top: 0; left: 0;
+      height: 100%; background: var(--green-dk); border-radius: 99px;
+      width: 100%; pointer-events: none;
+    }
+    .pp-fader-thumb {
+      position: absolute; top: 50%; transform: translate(-50%, -50%);
+      width: 14px; height: 14px; border-radius: 50%;
+      background: var(--text); border: 2px solid var(--green);
+      pointer-events: none; transition: transform .1s;
+    }
+    .pp-fader-wrap:hover .pp-fader-thumb { transform: translate(-50%, -50%) scale(1.25); }
+    .pp-vol-label {
+      font-size: .7rem; color: var(--muted); width: 30px; text-align: right;
+      flex-shrink: 0; font-variant-numeric: tabular-nums;
+    }
+
+    /* Silenced state: dimmed when muted or solo-excluded */
+    .pp-track.is-silenced .pp-track-icon,
+    .pp-track.is-silenced .pp-track-name,
+    .pp-track.is-silenced .pp-fader-wrap,
+    .pp-track.is-silenced .pp-vol-label { opacity: .28; }
+
+    /* ══════════════════════════════════════════════════════════════════════
+       Home view — hero, mode choice, library
+       ══════════════════════════════════════════════════════════════════════ */
+
+    .home-wide { max-width: 880px; }
+
+    /* ── Hero ────────────────────────────────────────────────────────────── */
+    .hero { position: relative; text-align: center; margin-bottom: 2.75rem; }
+    .hero-glow {
+      position: absolute; top: -90px; left: 50%; transform: translateX(-50%);
+      width: 680px; height: 340px; z-index: -1; pointer-events: none;
+      background:
+        radial-gradient(circle at 32% 35%, rgba(142,192,124,.20), transparent 60%),
+        radial-gradient(circle at 68% 65%, rgba(211,134,155,.16), transparent 60%);
+      filter: blur(42px);
+    }
+    .hero .wordmark {
+      font-size: 3.4rem;
+      font-weight: 800;
+      letter-spacing: -.035em;
+      display: inline-flex;
+      align-items: baseline;
+      gap: .1em;
+      background: linear-gradient(135deg, var(--text) 45%, var(--green) 145%);
+      -webkit-background-clip: text; background-clip: text;
+      color: transparent; -webkit-text-fill-color: transparent;
+    }
+    .hero .wordmark .dot {
+      color: var(--green); -webkit-text-fill-color: var(--green);
+      background: none;
+    }
+    .hero .tagline {
+      margin-top: .75rem;
+      color: var(--muted);
+      font-size: 1.05rem;
+      line-height: 1.55;
+      max-width: 32em;
+      margin-left: auto; margin-right: auto;
+    }
+    .hero .tagline strong { color: var(--text); font-weight: 600; }
+
+    /* ── Mode choice (Practice vs Karaoke) ──────────────────────────────── */
+    .mode-choice {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.1rem;
+      margin-bottom: 2rem;
+    }
+    @media (max-width: 620px) { .mode-choice { grid-template-columns: 1fr; } }
+
+    .choice-card {
+      position: relative;
+      text-align: left;
+      background: linear-gradient(165deg, color-mix(in srgb, var(--accent, var(--green)) 7%, var(--surface)), var(--surface) 60%);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 1px 2px rgba(0,0,0,.25);
+      padding: 1.75rem 1.6rem;
+      cursor: pointer;
+      transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+    }
+    .choice-card:hover {
+      transform: translateY(-3px);
+      border-color: var(--accent, var(--green));
+      box-shadow: 0 14px 30px -12px color-mix(in srgb, var(--accent, var(--green)) 45%, transparent), var(--shadow);
+    }
+    .choice-card .cc-icon-tile {
+      width: 52px; height: 52px; border-radius: 14px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.6rem; margin-bottom: 1rem;
+      background: linear-gradient(160deg, color-mix(in srgb, var(--accent, var(--green)) 24%, transparent), color-mix(in srgb, var(--accent, var(--green)) 8%, transparent));
+      border: 1px solid color-mix(in srgb, var(--accent, var(--green)) 32%, transparent);
+    }
+    .choice-card .cc-title {
+      font-size: 1.35rem; font-weight: 700; letter-spacing: -.01em; color: var(--text);
+      margin-bottom: .4rem;
+    }
+    .choice-card .cc-desc { font-size: .87rem; color: var(--muted); line-height: 1.5; }
+    #btn-practice.choice-card { --accent: var(--green); }
+    #btn-karaoke.choice-card { --accent: var(--purple); }
+
+    /* ── Upload flow wrapper (revealed after a mode is chosen) ─────────── */
+    #upload-flow-header {
+      display: flex; align-items: center; gap: .6rem;
+      margin-bottom: .85rem;
+    }
+    #back-to-home {
+      background: transparent; border: none; color: var(--muted);
+      font-size: .85rem; cursor: pointer; padding: .3rem .1rem;
+      display: flex; align-items: center; gap: .3rem;
+      transition: color .15s;
+    }
+    #back-to-home:hover { color: var(--text); }
+    .top-back-btn {
+      display: flex; align-items: center; gap: .3rem;
+      background: transparent; border: none; color: var(--muted);
+      font-size: .8rem; cursor: pointer; padding: 0 0 .85rem;
+      transition: color .15s;
+    }
+    .top-back-btn:hover { color: var(--text); }
+    #kp-back-btn { padding-bottom: .6rem; }
+    #upload-flow-title {
+      font-size: .78rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+      color: var(--accent-mode, var(--green));
+    }
+    #upload-flow.mode-karaoke #upload-flow-title { --accent-mode: var(--purple); }
+
+    /* ── Library ─────────────────────────────────────────────────────────── */
+    .library-section { margin-top: 2rem; }
+    .library-header {
+      display: flex; align-items: baseline; justify-content: space-between;
+      margin-bottom: .9rem;
+    }
+    .library-header h2 {
+      font-size: 1.2rem; font-weight: 700; letter-spacing: -.01em; color: var(--text);
+    }
+    .library-count { font-size: .78rem; color: var(--muted); }
+    .library-empty {
+      text-align: center; color: var(--muted); font-size: .85rem;
+      padding: 2.25rem 1rem; border: 1px dashed var(--border); border-radius: var(--radius);
+    }
+    .library-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: .85rem;
+    }
+
+    /* Simple library card */
+    .lib-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 1.1rem 1.15rem 1rem;
+      cursor: pointer;
+      transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
+    }
+    .lib-card:hover {
+      transform: translateY(-2px);
+      border-color: var(--accent-mode, var(--green));
+      box-shadow: 0 8px 20px -10px color-mix(in srgb, var(--accent-mode, var(--green)) 45%, transparent);
+    }
+    .lib-card.mode-karaoke { --accent-mode: var(--purple); }
+    .lib-card.mode-practice { --accent-mode: var(--green); }
+
+    .lib-badge {
+      display: inline-flex; align-items: center; gap: .3rem;
+      font-size: .64rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+      color: var(--accent-mode, var(--green));
+      background: color-mix(in srgb, var(--accent-mode, var(--green)) 15%, transparent);
+      border-radius: 99px; padding: .28rem .65rem;
+      margin-bottom: .8rem;
+    }
+    .lib-title {
+      font-size: .95rem; font-weight: 600; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .lib-title.untitled { color: var(--muted); font-style: italic; font-weight: 500; }
+    .lib-artist {
+      font-size: .8rem; color: var(--muted);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      margin-top: .15rem;
+    }
+    .lib-meta {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-top: .7rem;
+    }
+    .lib-date { font-size: .68rem; color: var(--muted); }
+    .lib-actions { display: flex; gap: .3rem; }
+    .lib-rename-btn, .lib-delete-btn {
+      background: transparent; border: none; color: var(--muted);
+      font-size: .72rem; cursor: pointer; padding: .1rem .3rem;
+      transition: color .15s;
+    }
+    .lib-rename-btn:hover { color: var(--accent-mode, var(--green)); }
+    .lib-delete-btn:hover { color: var(--red); }
+
+    /* ── Save / rename modal ────────────────────────────────────────────── */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.6);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 100; padding: 1rem;
+    }
+    .modal-overlay.hidden { display: none; }
+    .modal-box {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); box-shadow: var(--shadow);
+      padding: 1.5rem; width: 100%; max-width: 380px;
+    }
+    .modal-box h3 {
+      font-size: 1.15rem; font-weight: 700; letter-spacing: -.01em; margin-bottom: 1rem; color: var(--text);
+    }
+    .modal-actions {
+      display: flex; gap: .6rem; margin-top: 1.1rem;
+    }
+    .modal-actions button {
+      flex: 1; padding: .55rem; border-radius: 8px; font-size: .85rem;
+      cursor: pointer; font-weight: 500; transition: opacity .15s;
+    }
+    #modal-cancel { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+    #modal-save { background: var(--green); border: 1px solid var(--green); color: var(--bg); }
+    #modal-save:disabled { opacity: .5; cursor: not-allowed; }
+
+    /* ── GarageBand export button (inside practice card) ────────────────── */
+    .gb-export-row {
+      padding: .8rem 1.1rem;
+      border-top: 1px solid var(--border);
+      background: rgba(0,0,0,.12);
+    }
+    .gb-export-btn {
+      width: 100%; padding: .6rem; border-radius: 8px;
+      border: 1px solid var(--amber); background: transparent; color: var(--amber);
+      font-size: .82rem; font-weight: 500; cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+    .gb-export-btn:hover:not(:disabled) { background: var(--amber); color: var(--bg); }
+    .gb-export-btn:disabled { opacity: .5; cursor: not-allowed; }
+    .gb-export-hint {
+      font-size: .68rem; color: var(--muted); text-align: center; margin-top: .4rem;
+    }
   </style>
 </head>
 <body>
 
-<div class="container">
+<div class="container home-wide" id="app-root">
 
-  <!-- ── Header ─────────────────────────────────────────────────────────── -->
-  <header>
-    <h1><span>Neiro</span></h1>
-    <p>Separate any song into stems using deep-learning models.</p>
-  </header>
+  <!-- ── Home view: hero + mode choice + library ──────────────────────────── -->
+  <div id="home-view">
+    <header class="hero">
+      <div class="hero-glow" aria-hidden="true"></div>
+      <div class="wordmark">Neiro<span class="dot">.</span></div>
+      <p class="tagline">Split a track into instruments, then <strong>mute, fade, and loop</strong> any part while you play along — or drop into <strong>karaoke mode</strong> for synced lyrics.</p>
+    </header>
+
+    <div class="mode-choice">
+      <button type="button" class="choice-card" id="btn-practice">
+        <div class="cc-icon-tile">🎸</div>
+        <div class="cc-title">Practice</div>
+        <div class="cc-desc">Full 6-stem separation — vocals, bass, drums, guitar, piano, other. Mute, solo, or fade any instrument while you play along.</div>
+      </button>
+      <button type="button" class="choice-card" id="btn-karaoke">
+        <div class="cc-icon-tile">🎤</div>
+        <div class="cc-title">Karaoke</div>
+        <div class="cc-desc">Fast vocals / instrumental split with synced, clickable lyrics you can sing along to.</div>
+      </button>
+    </div>
+
+    <div class="library-section">
+      <div class="library-header">
+        <h2>Your library</h2>
+        <span class="library-count" id="library-count"></span>
+      </div>
+      <div id="library-grid" class="library-grid"></div>
+      <div id="library-empty" class="library-empty hidden">Nothing saved yet — process a track and save it to see it here.</div>
+    </div>
+  </div>
+
+  <!-- ── Upload flow: revealed after choosing Practice or Karaoke ─────────── -->
+  <div id="upload-flow" class="hidden">
+    <div id="upload-flow-header">
+      <button type="button" id="back-to-home">← Back</button>
+      <span id="upload-flow-title"></span>
+    </div>
 
   <!-- ── Upload card ────────────────────────────────────────────────────── -->
   <div id="upload-card" class="card">
@@ -423,8 +1004,19 @@
       <input type="file" id="file-input" accept=".mp3,.wav,.flac,.m4a,.ogg" />
     </div>
 
-    <!-- Mode toggle -->
-    <div class="mode-row">
+    <!-- YouTube URL input -->
+    <div class="yt-divider">or</div>
+    <div id="yt-row">
+      <input class="meta-input" id="yt-url" type="url"
+             placeholder="Paste a YouTube URL to extract audio" />
+      <button id="yt-btn" disabled>Extract</button>
+    </div>
+    <div id="yt-status"></div>
+
+    <!-- Mode toggle (legacy manual stem-count picker — kept for the advanced/CLI
+         option set, hidden from the primary flow which now only offers Practice
+         or Karaoke via the choice cards above) -->
+    <div class="mode-row" style="display:none">
       <button class="mode-btn active" id="btn-6stem" data-mode="6">6 Stems <small>(vocals, bass, drums, guitar, piano, other)</small></button>
       <button class="mode-btn" id="btn-2stem" data-mode="2">2 Stems <small>(vocals + instrumental)</small></button>
       <button class="mode-btn" id="btn-4stem" data-mode="4">4 Stems <small>(bass, drums, other, vocals)</small></button>
@@ -532,8 +1124,37 @@
 
     </div><!-- /advanced-panel -->
 
+    <!-- Karaoke metadata form (shown only when karaoke mode active) -->
+    <div id="karaoke-meta" style="display:none;margin-top:1.25rem;">
+      <div class="meta-row">
+        <div class="meta-field">
+          <label class="meta-label" for="karaoke-artist">Artist</label>
+          <input class="meta-input" id="karaoke-artist" type="text" placeholder="e.g. The Beatles" />
+        </div>
+        <div class="meta-field">
+          <label class="meta-label" for="karaoke-title">Track title</label>
+          <input class="meta-input" id="karaoke-title" type="text" placeholder="e.g. Hey Jude" />
+        </div>
+      </div>
+      <p class="meta-hint">Auto-parsed from filename. Edit if needed.</p>
+    </div>
+
     <button id="submit-btn" disabled>Separate</button>
+    <button id="karaoke-start-btn" disabled style="display:none;">🎤 Start Karaoke</button>
   </div><!-- /upload-card -->
+  </div><!-- /upload-flow -->
+
+  <!-- ── Lyrics picker card ─────────────────────────────────────────────── -->
+  <div id="lyrics-picker-card" class="card hidden">
+    <div class="lyrics-picker-header">
+      <strong>Choose lyrics for:</strong>
+      <span id="lyrics-picker-title"></span>
+    </div>
+    <div id="lyrics-picker-list"></div>
+    <div class="lyrics-picker-footer">
+      <button id="lyrics-picker-skip">Skip lyrics</button>
+    </div>
+  </div>
 
   <!-- ── Progress card ──────────────────────────────────────────────────── -->
   <div id="progress-card" class="card hidden">
@@ -548,10 +1169,15 @@
 
   <!-- ── Results card ───────────────────────────────────────────────────── -->
   <div id="results-card" class="card hidden">
+    <button type="button" id="results-back-btn" class="top-back-btn">← Back to library</button>
     <div class="results-title">Stems ready</div>
-    <div class="stem-buttons" id="stem-buttons"></div>
-    <p class="results-hint hidden" id="results-hint">These stems live only in your browser — create a shareable link to save them permanently.</p>
-    <button id="share-btn" class="share-btn hidden">Create shareable link</button>
+    <div id="practice-mount"></div>
+    <details id="stems-details" class="stems-details hidden">
+      <summary>Individual stem downloads</summary>
+      <div class="stem-buttons" id="stem-buttons"></div>
+    </details>
+    <p class="results-hint hidden" id="results-hint">These stems live only in your browser — save to your library to keep them.</p>
+    <button id="share-btn" class="share-btn hidden">💾 Save to library</button>
     <div id="share-row" class="share-row hidden">
       <span class="share-label">Share:</span>
       <input id="share-url" class="share-input" readonly />
@@ -560,7 +1186,59 @@
     <button id="reset-btn">Separate another file</button>
   </div>
 
+  <!-- ── Karaoke player card ──────────────────────────────────────────────── -->
+  <div id="karaoke-player-card" class="card hidden">
+    <div class="kp-header">
+      <button type="button" id="kp-back-btn" class="top-back-btn">← Back to library</button>
+      <div class="kp-title" id="kp-song-title"></div>
+      <div class="kp-artist" id="kp-song-artist"></div>
+    </div>
+    <div class="kp-transport">
+      <button class="kp-play-btn" id="kp-play-btn" aria-label="Play">▶</button>
+      <div class="kp-seek-bg" id="kp-seek-bg">
+        <div class="kp-seek-fill" id="kp-seek-fill"></div>
+      </div>
+      <span class="kp-time" id="kp-time">0:00 / 0:00</span>
+    </div>
+    <div class="kp-vocals-row">
+      <input type="checkbox" id="kp-vocals-check" />
+      <label for="kp-vocals-check">Include vocals</label>
+      <span class="kp-vocals-hint">&nbsp;— toggle karaoke / listen-along</span>
+    </div>
+    <div class="kp-lyrics" id="kp-lyrics-panel"></div>
+    <div class="kp-actions">
+      <a id="kp-dl-instrum" class="kp-dl-btn" download>⬇ Instrumental</a>
+      <a id="kp-dl-vocals"  class="kp-dl-btn" download>⬇ Vocals</a>
+      <button id="kp-save-btn" class="kp-dl-btn">💾 Save</button>
+      <button id="kp-reset-btn" class="kp-dl-btn">↩ New song</button>
+    </div>
+    <audio id="kp-audio-instrum" preload="auto"></audio>
+    <audio id="kp-audio-vocals"  preload="auto"></audio>
+  </div>
+
 </div><!-- /container -->
+
+<!-- ── Save / rename modal ─────────────────────────────────────────────────── -->
+<div id="save-modal" class="modal-overlay hidden">
+  <div class="modal-box">
+    <h3 id="modal-heading">Save to library</h3>
+    <div class="meta-row">
+      <div class="meta-field">
+        <label class="meta-label" for="modal-artist">Artist</label>
+        <input class="meta-input" id="modal-artist" type="text" placeholder="e.g. The Beatles" />
+      </div>
+      <div class="meta-field">
+        <label class="meta-label" for="modal-title">Track title</label>
+        <input class="meta-input" id="modal-title" type="text" placeholder="e.g. Hey Jude" />
+      </div>
+    </div>
+    <div id="modal-error" class="error-box hidden" style="margin-top:.75rem;margin-bottom:0;"></div>
+    <div class="modal-actions">
+      <button type="button" id="modal-cancel">Cancel</button>
+      <button type="button" id="modal-save">Save</button>
+    </div>
+  </div>
+</div>
 
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
@@ -570,6 +1248,35 @@ let use6stem = true;
 let abortController = null;
 let blobUrls = [];
 let currentFilesB64 = null;
+
+// Karaoke state
+let isKaraokeMode = false;
+let isPracticeMode = false;
+let practicePlayer = null;
+let kpBlobUrls = [];
+let lrcLines = [];
+let karaokeActiveLine = -1;
+let karaokeRafId = null;
+let audioCtx = null;
+let vocalsGainNode = null;
+let vocalsMediaNode = null;
+let karaokeListenersSetup = false;
+let userHoverLyrics = false;
+let lyricJustClicked = false;
+let seekPending = false;
+let seekVersion = 0;
+let currentKaraokeFilesB64 = null;
+
+// Save-modal state: what the pending Save action should do
+// { kind: 'new', mode: 'practice'|'karaoke' } or { kind: 'rename', jobId }
+let pendingSave = null;
+
+function seekAudio(audio, time) {
+  return new Promise(resolve => {
+    audio.addEventListener('seeked', resolve, { once: true });
+    audio.currentTime = time;
+  });
+}
 
 // Model labels / icons
 const MODEL_ICONS = {
@@ -603,7 +1310,10 @@ const progBar     = document.getElementById('prog-bar');
 const logToggle   = document.getElementById('log-toggle');
 const logArea     = document.getElementById('log-area');
 const stemButtons = document.getElementById('stem-buttons');
+const practiceMount = document.getElementById('practice-mount');
+const stemsDetails  = document.getElementById('stems-details');
 const resetBtn    = document.getElementById('reset-btn');
+const resultsBackBtn = document.getElementById('results-back-btn');
 const bigShiftsSlider = document.getElementById('BigShifts');
 const bigShiftsVal    = document.getElementById('BigShifts-val');
 const inputGainSlider = document.getElementById('input_gain');
@@ -613,6 +1323,53 @@ const shareUrlEl   = document.getElementById('share-url');
 const copyBtn      = document.getElementById('copy-btn');
 const shareBtn     = document.getElementById('share-btn');
 const resultsHint  = document.getElementById('results-hint');
+
+// Karaoke / Practice DOM refs
+const btnKaraoke        = document.getElementById('btn-karaoke');
+const btnPractice       = document.getElementById('btn-practice');
+const karaokeMeta       = document.getElementById('karaoke-meta');
+const karaokeArtistEl   = document.getElementById('karaoke-artist');
+const karaokeTitleEl    = document.getElementById('karaoke-title');
+const karaokeStartBtn   = document.getElementById('karaoke-start-btn');
+const karaokePlayerCard = document.getElementById('karaoke-player-card');
+const kpSongTitle       = document.getElementById('kp-song-title');
+const kpSongArtist      = document.getElementById('kp-song-artist');
+const kpPlayBtn         = document.getElementById('kp-play-btn');
+const kpSeekBg          = document.getElementById('kp-seek-bg');
+const kpSeekFill        = document.getElementById('kp-seek-fill');
+const kpTimeEl          = document.getElementById('kp-time');
+const kpVocalsCheck     = document.getElementById('kp-vocals-check');
+const kpLyricsPanel     = document.getElementById('kp-lyrics-panel');
+const kpDlInstrum       = document.getElementById('kp-dl-instrum');
+const kpDlVocals        = document.getElementById('kp-dl-vocals');
+const kpResetBtn        = document.getElementById('kp-reset-btn');
+const kpBackBtn          = document.getElementById('kp-back-btn');
+const kpAudioInstrum    = document.getElementById('kp-audio-instrum');
+const kpAudioVocals     = document.getElementById('kp-audio-vocals');
+const lyricPickerCard     = document.getElementById('lyrics-picker-card');
+const lyricPickerTitle    = document.getElementById('lyrics-picker-title');
+const lyricPickerList     = document.getElementById('lyrics-picker-list');
+const lyricPickerSkip     = document.getElementById('lyrics-picker-skip');
+const ytUrlEl             = document.getElementById('yt-url');
+const ytBtn             = document.getElementById('yt-btn');
+const ytStatusEl        = document.getElementById('yt-status');
+
+// Home / library / save-modal DOM refs
+const homeView          = document.getElementById('home-view');
+const uploadFlow         = document.getElementById('upload-flow');
+const uploadFlowTitle    = document.getElementById('upload-flow-title');
+const backToHomeBtn      = document.getElementById('back-to-home');
+const libraryGrid        = document.getElementById('library-grid');
+const libraryCountEl     = document.getElementById('library-count');
+const libraryEmptyEl     = document.getElementById('library-empty');
+const saveModal          = document.getElementById('save-modal');
+const modalHeading       = document.getElementById('modal-heading');
+const modalArtistEl      = document.getElementById('modal-artist');
+const modalTitleEl       = document.getElementById('modal-title');
+const modalCancelBtn     = document.getElementById('modal-cancel');
+const modalSaveBtn       = document.getElementById('modal-save');
+const modalErrorEl       = document.getElementById('modal-error');
+const kpSaveBtn          = document.getElementById('kp-save-btn');
 
 // ── File selection ─────────────────────────────────────────────────────────
 dropZone.addEventListener('click', () => fileInput.click());
@@ -629,18 +1386,117 @@ dropZone.addEventListener('drop', e => {
 function setFile(f) {
   selectedFile = f;
   fileNameEl.textContent = f ? f.name : '';
-  submitBtn.disabled = !f;
+  submitBtn.disabled = !f || isKaraokeMode;
+  karaokeStartBtn.disabled = !f || !isKaraokeMode;
+  if (f && isKaraokeMode) {
+    const { artist, title } = parseFilename(f.name);
+    karaokeArtistEl.value = artist;
+    karaokeTitleEl.value  = title;
+  }
 }
 
+// ── YouTube extraction ─────────────────────────────────────────────────────
+ytUrlEl.addEventListener('input', () => {
+  ytBtn.disabled = !ytUrlEl.value.trim();
+  ytStatusEl.textContent = '';
+  ytStatusEl.style.color = 'var(--muted)';
+});
+
+ytBtn.addEventListener('click', async () => {
+  const url = ytUrlEl.value.trim();
+  if (!url) return;
+
+  ytBtn.disabled = true;
+  ytStatusEl.style.color = 'var(--muted)';
+  ytStatusEl.textContent = 'Downloading from YouTube…';
+
+  fileInput.value = '';
+
+  try {
+    const resp = await fetch('/api/youtube', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || resp.statusText);
+    }
+    const { audio, filename } = await resp.json();
+
+    const bytes = Uint8Array.from(atob(audio), c => c.charCodeAt(0));
+    const file = new File([bytes], filename, { type: 'audio/mpeg' });
+    setFile(file);
+
+    ytStatusEl.textContent = '';
+    ytUrlEl.value = '';
+    ytBtn.disabled = true;
+  } catch (e) {
+    ytStatusEl.style.color = 'var(--red)';
+    ytStatusEl.textContent = 'Error: ' + e.message;
+    ytBtn.disabled = false;
+  }
+});
+
 // ── Mode toggle ────────────────────────────────────────────────────────────
-[btn6stem, btn2stem, btn4stem].forEach(btn => btn.addEventListener('click', () => {
+[btn6stem, btn2stem, btn4stem, btnKaraoke, btnPractice].forEach(btn => btn.addEventListener('click', () => {
   btn6stem.classList.toggle('active', btn === btn6stem);
   btn2stem.classList.toggle('active', btn === btn2stem);
   btn4stem.classList.toggle('active', btn === btn4stem);
-  use6stem  = (btn === btn6stem);
-  vocalsOnly = (btn === btn2stem);
+  btnKaraoke.classList.toggle('karaoke-active', btn === btnKaraoke);
+  btnPractice.classList.toggle('practice-active', btn === btnPractice);
+
+  isKaraokeMode  = (btn === btnKaraoke);
+  isPracticeMode = (btn === btnPractice);
+  // Practice mode implies 6-stem so all instruments are available
+  use6stem       = (btn === btn6stem) || (btn === btnPractice);
+  vocalsOnly     = (btn === btn2stem);
   advPanel.classList.toggle('six-stem-active', use6stem);
+
+  // Show/hide karaoke-specific UI
+  karaokeMeta.style.display      = isKaraokeMode ? 'block'  : 'none';
+  submitBtn.style.display        = isKaraokeMode ? 'none'   : 'block';
+  karaokeStartBtn.style.display  = isKaraokeMode ? 'block'  : 'none';
+  advToggle.style.visibility     = isKaraokeMode ? 'hidden' : 'visible';
+
+  submitBtn.disabled        = !selectedFile || isKaraokeMode;
+  karaokeStartBtn.disabled  = !selectedFile || !isKaraokeMode;
+
+  if (isKaraokeMode && selectedFile) {
+    const { artist, title } = parseFilename(selectedFile.name);
+    karaokeArtistEl.value = artist;
+    karaokeTitleEl.value  = title;
+  }
 }));
+
+// ── Home <-> upload-flow navigation ─────────────────────────────────────────
+[btnKaraoke, btnPractice].forEach(btn => btn.addEventListener('click', () => {
+  homeView.classList.add('hidden');
+  uploadFlow.classList.remove('hidden');
+  const karaoke = (btn === btnKaraoke);
+  uploadFlow.classList.toggle('mode-karaoke', karaoke);
+  uploadFlowTitle.textContent = karaoke ? '🎤 Karaoke' : '🎸 Practice';
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}));
+
+function showHome(pushUrl = true) {
+  uploadFlow.classList.add('hidden');
+  progressCard.classList.add('hidden');
+  resultsCard.classList.add('hidden');
+  karaokePlayerCard.classList.add('hidden');
+  lyricPickerCard.classList.add('hidden');
+  homeView.classList.remove('hidden');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  if (pushUrl && /\/result\//.test(location.pathname)) {
+    history.pushState({}, '', '/');
+  }
+  loadLibrary();
+}
+
+backToHomeBtn.addEventListener('click', () => {
+  if (abortController) { abortController.abort(); abortController = null; }
+  showHome();
+});
 
 // ── Advanced toggle ────────────────────────────────────────────────────────
 advToggle.addEventListener('click', () => {
@@ -841,12 +1697,32 @@ function appendLog(text) {
 const HIDE = new Set(['instrum2']);
 const ORDER = ['vocals','bass','drums','guitar','piano','other','instrum'];
 
-function showResults(files, fromShare = false) {
+function b64ToBlob(b64, mime) {
+  const binary = atob(b64);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+const PRACTICE_STEMS = ['vocals','bass','drums','guitar','piano','other'];
+
+async function showResults(files, fromShare = false) {
   blobUrls.forEach(u => URL.revokeObjectURL(u));
   blobUrls = [];
+
+  // Clean up any previous practice player
+  const existingPracticeCard = document.getElementById('practice-card');
+  if (existingPracticeCard) existingPracticeCard.remove();
+  if (practicePlayer) { practicePlayer.destroy(); practicePlayer = null; }
+
+  homeView.classList.add('hidden');
+  uploadFlow.classList.add('hidden');
   progressCard.classList.add('hidden');
   resultsCard.classList.remove('hidden');
   stemButtons.innerHTML = '';
+  stemsDetails.open = false;
+  stemsDetails.classList.add('hidden');
   shareRow.classList.add('hidden');
 
   if (fromShare) {
@@ -857,7 +1733,7 @@ function showResults(files, fromShare = false) {
     currentFilesB64 = files;
     shareBtn.classList.remove('hidden');
     shareBtn.disabled = false;
-    shareBtn.textContent = 'Create shareable link';
+    shareBtn.textContent = '💾 Save to library';
     resultsHint.classList.remove('hidden');
   }
 
@@ -872,7 +1748,9 @@ function showResults(files, fromShare = false) {
       return (ORDER.indexOf(sa) + 1 || 99) - (ORDER.indexOf(sb) + 1 || 99);
     });
 
-  sorted.forEach(fname => {
+  const stemFiles = {};
+
+  for (const fname of sorted) {
     const stem = fname.replace(/\.\w+$/, '').split('_').pop();
     const info = MODEL_ICONS[stem] || { icon: '🎵', label: stem };
     let url;
@@ -880,12 +1758,25 @@ function showResults(files, fromShare = false) {
       url = files[fname];
     } else {
       const mime = fname.endsWith('.mp3') ? 'audio/mpeg' : 'audio/flac';
-      const bytes = Uint8Array.from(atob(files[fname]), c => c.charCodeAt(0));
-      url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+      url = URL.createObjectURL(b64ToBlob(files[fname], mime));
       blobUrls.push(url);
     }
     stemButtons.appendChild(buildStemCard(info, url, fname));
-  });
+    if (PRACTICE_STEMS.includes(stem)) stemFiles[stem] = url;
+    // Yield between files so browser stays responsive
+    await new Promise(r => setTimeout(r, 0));
+  }
+
+  // Practice Mode is the main event when we have enough stems to mix — the
+  // individual per-stem players are then just a secondary download option.
+  if (Object.keys(stemFiles).length >= 3) {
+    const pc = buildPracticeCard(stemFiles);
+    practiceMount.appendChild(pc);
+    stemsDetails.classList.remove('hidden');
+  } else {
+    stemsDetails.classList.remove('hidden');
+    stemsDetails.open = true;
+  }
 }
 
 function buildStemCard(info, url, fname) {
@@ -897,7 +1788,7 @@ function buildStemCard(info, url, fname) {
       <span class="stem-name">${info.label}</span>
       <a class="dl-btn" href="${url}" download="${fname}" title="Download">⬇</a>
     </div>
-    <audio class="stem-audio" preload="none" src="${url}"></audio>
+    <audio class="stem-audio" preload="metadata" src="${url}"></audio>
     <div class="stem-player">
       <button class="play-btn" aria-label="Play">▶</button>
       <div class="seek-bg"><div class="seek-fill"></div></div>
@@ -913,7 +1804,12 @@ function buildStemCard(info, url, fname) {
   playBtn.addEventListener('click', () => {
     if (audio.paused) {
       pauseAll();
-      audio.play();
+      audio.play().catch(err => {
+        playBtn.textContent = '▶';
+        playBtn.classList.remove('playing');
+        timeDisp.textContent = 'Error';
+        console.error('Play failed:', err);
+      });
       playBtn.textContent = '⏸';
       playBtn.classList.add('playing');
     } else {
@@ -921,6 +1817,13 @@ function buildStemCard(info, url, fname) {
       playBtn.textContent = '▶';
       playBtn.classList.remove('playing');
     }
+  });
+  audio.addEventListener('error', () => {
+    const code = audio.error ? audio.error.code : '?';
+    timeDisp.textContent = 'Error';
+    playBtn.textContent = '▶';
+    playBtn.classList.remove('playing');
+    console.error('Audio error on', fname, 'code:', code, audio.error);
   });
   audio.addEventListener('timeupdate', () => {
     const pct = audio.duration ? (audio.currentTime / audio.duration) * 100 : 0;
@@ -938,6 +1841,443 @@ function buildStemCard(info, url, fname) {
   return card;
 }
 
+// ── GarageBand export: fetch stem bytes + build a plain (store-only) ZIP ────
+async function fetchStemBytes(url) {
+  async function tryFetch(u) {
+    const r = await fetch(u);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return new Uint8Array(await r.arrayBuffer());
+  }
+  if (url.startsWith('blob:')) return tryFetch(url);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await tryFetch(url);
+    } catch (_) {
+      if (attempt < 2) await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+  return tryFetch(`/api/audio-proxy?url=${encodeURIComponent(url)}`);
+}
+
+function crc32(bytes) {
+  let table = crc32._table;
+  if (!table) {
+    table = crc32._table = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      table[n] = c >>> 0;
+    }
+  }
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) crc = table[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+// Builds an uncompressed (STORE method) ZIP — no compression library needed,
+// and audio files barely compress anyway.
+function buildZip(entries) {
+  const encoder = new TextEncoder();
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+
+  entries.forEach(({ name, bytes }) => {
+    const nameBytes = encoder.encode(name);
+    const crc = crc32(bytes);
+    const size = bytes.length;
+
+    const localHeader = new DataView(new ArrayBuffer(30));
+    localHeader.setUint32(0, 0x04034b50, true);
+    localHeader.setUint16(4, 20, true);
+    localHeader.setUint16(6, 0, true);
+    localHeader.setUint16(8, 0, true);   // STORE = no compression
+    localHeader.setUint16(10, 0, true);
+    localHeader.setUint16(12, 0, true);
+    localHeader.setUint32(14, crc, true);
+    localHeader.setUint32(18, size, true);
+    localHeader.setUint32(22, size, true);
+    localHeader.setUint16(26, nameBytes.length, true);
+    localHeader.setUint16(28, 0, true);
+    localParts.push(new Uint8Array(localHeader.buffer), nameBytes, bytes);
+
+    const centralHeader = new DataView(new ArrayBuffer(46));
+    centralHeader.setUint32(0, 0x02014b50, true);
+    centralHeader.setUint16(4, 20, true);
+    centralHeader.setUint16(6, 20, true);
+    centralHeader.setUint16(8, 0, true);
+    centralHeader.setUint16(10, 0, true);
+    centralHeader.setUint16(12, 0, true);
+    centralHeader.setUint16(14, 0, true);
+    centralHeader.setUint32(16, crc, true);
+    centralHeader.setUint32(20, size, true);
+    centralHeader.setUint32(24, size, true);
+    centralHeader.setUint16(28, nameBytes.length, true);
+    centralHeader.setUint16(30, 0, true);
+    centralHeader.setUint16(32, 0, true);
+    centralHeader.setUint16(34, 0, true);
+    centralHeader.setUint16(36, 0, true);
+    centralHeader.setUint32(38, 0, true);
+    centralHeader.setUint32(42, offset, true);
+    centralParts.push(new Uint8Array(centralHeader.buffer), nameBytes);
+
+    offset += localHeader.buffer.byteLength + nameBytes.length + size;
+  });
+
+  const centralSize = centralParts.reduce((n, p) => n + p.length, 0);
+  const endRecord = new DataView(new ArrayBuffer(22));
+  endRecord.setUint32(0, 0x06054b50, true);
+  endRecord.setUint16(4, 0, true);
+  endRecord.setUint16(6, 0, true);
+  endRecord.setUint16(8, entries.length, true);
+  endRecord.setUint16(10, entries.length, true);
+  endRecord.setUint32(12, centralSize, true);
+  endRecord.setUint32(16, offset, true);
+  endRecord.setUint16(20, 0, true);
+
+  return new Blob([...localParts, ...centralParts, new Uint8Array(endRecord.buffer)], { type: 'application/zip' });
+}
+
+function buildPracticeCard(stemFilesMap) {
+  const STEM_ORDER = ['vocals','bass','drums','guitar','piano','other'];
+  const stems = STEM_ORDER.filter(s => stemFilesMap[s]);
+
+  const card = document.createElement('div');
+  card.className = 'card practice-card';
+  card.id = 'practice-card';
+
+  const tracksHtml = stems.map(s => {
+    const info = MODEL_ICONS[s] || { icon: '🎵', label: s };
+    return `
+      <div class="pp-track" data-stem="${s}">
+        <span class="pp-track-icon">${info.icon}</span>
+        <span class="pp-track-name">${info.label}</span>
+        <button class="pp-solo-btn" data-stem="${s}" title="Solo — hear only this stem">S</button>
+        <button class="pp-mute-btn" data-stem="${s}" title="Mute — silence this stem">M</button>
+        <div class="pp-fader-wrap" data-stem="${s}">
+          <div class="pp-fader-track">
+            <div class="pp-fader-fill" style="width:100%"></div>
+            <div class="pp-fader-thumb" style="left:100%"></div>
+          </div>
+        </div>
+        <span class="pp-vol-label" data-stem="${s}">100</span>
+      </div>`;
+  }).join('');
+
+  card.innerHTML = `
+    <div class="pp-transport">
+      <button class="pp-ctrl-btn pp-restart-btn" title="Restart" disabled>⏮</button>
+      <button class="pp-ctrl-btn pp-skip-back-btn" title="Back 5 seconds" disabled>⏪ 5</button>
+      <button class="pp-play-btn" aria-label="Play" disabled>▶</button>
+      <button class="pp-ctrl-btn pp-skip-fwd-btn" title="Forward 5 seconds" disabled>5 ⏩</button>
+      <div class="pp-seek-wrap" style="pointer-events:none">
+        <div class="pp-seek-track">
+          <div class="pp-seek-fill"></div>
+          <div class="pp-seek-thumb"></div>
+        </div>
+        <div class="pp-seek-tooltip"></div>
+      </div>
+      <span class="pp-time">Loading…</span>
+    </div>
+    <div class="pp-tracks-header">
+      <span class="pp-tracks-title">Practice Mode</span>
+      <span class="pp-tracks-hint">S = solo &nbsp;·&nbsp; M = mute</span>
+    </div>
+    <div class="pp-tracks">${tracksHtml}</div>
+    <div class="gb-export-row">
+      <button type="button" class="gb-export-btn" disabled>⬇ Download stems for GarageBand</button>
+      <div class="gb-export-hint">Drag each file into its own track — they're already time-aligned.</div>
+    </div>
+  `;
+
+  const playBtn     = card.querySelector('.pp-play-btn');
+  const restartBtn  = card.querySelector('.pp-restart-btn');
+  const skipBackBtn = card.querySelector('.pp-skip-back-btn');
+  const skipFwdBtn  = card.querySelector('.pp-skip-fwd-btn');
+  const seekWrap    = card.querySelector('.pp-seek-wrap');
+  const seekFill    = card.querySelector('.pp-seek-fill');
+  const seekThumb   = card.querySelector('.pp-seek-thumb');
+  const seekTooltip = card.querySelector('.pp-seek-tooltip');
+  const timeEl      = card.querySelector('.pp-time');
+  const gbBtn       = card.querySelector('.gb-export-btn');
+
+  gbBtn.addEventListener('click', async () => {
+    gbBtn.disabled = true;
+    const origText = gbBtn.textContent;
+    try {
+      const entries = await Promise.all(stems.map(async (stem, i) => {
+        const info = MODEL_ICONS[stem] || { icon: '🎵', label: stem };
+        gbBtn.textContent = `Fetching ${info.label}… (${i + 1}/${stems.length})`;
+        const bytes = await fetchStemBytes(stemFilesMap[stem]);
+        return { name: `${String(i + 1).padStart(2, '0')} ${info.label}.mp3`, bytes };
+      }));
+      gbBtn.textContent = 'Zipping…';
+      const zipBlob = buildZip(entries);
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'stems-for-garageband.zip';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (e) {
+      console.error('GarageBand export failed:', e);
+      gbBtn.textContent = 'Export failed — try again';
+      setTimeout(() => { gbBtn.textContent = origText; }, 2500);
+    } finally {
+      gbBtn.disabled = false;
+    }
+  });
+
+  // Mixer state
+  const soloSet = new Set();
+  const muteSet = new Set();
+  const faderVols = {};
+  stems.forEach(s => { faderVols[s] = 1; });
+
+  // Web Audio state (populated after async load)
+  let ctx = null;
+  let gainNodes = null;
+  let buffers = null;
+  let sources = {};
+  let ppPlaying = false;
+  let startOffset = 0;       // seconds into track when play() was last called
+  let playCtxTime = 0;       // ctx.currentTime when play() was called
+  let playGen = 0;           // incremented on each stop to cancel stale onended
+  let duration = 0;
+  let rafId = null;
+
+  function computedVol(stem) {
+    if (muteSet.has(stem)) return 0;
+    if (soloSet.size > 0 && !soloSet.has(stem)) return 0;
+    return faderVols[stem];
+  }
+
+  function applyVolumes() {
+    if (!gainNodes) return;
+    stems.forEach(stem => {
+      gainNodes[stem].gain.value = computedVol(stem);
+      const track = card.querySelector(`.pp-track[data-stem="${stem}"]`);
+      if (track) track.classList.toggle('is-silenced', computedVol(stem) === 0 && !soloSet.has(stem));
+    });
+  }
+
+  function getPosition() {
+    if (!ctx || !ppPlaying) return startOffset;
+    return Math.min(startOffset + (ctx.currentTime - playCtxTime), duration);
+  }
+
+  function doPlay() {
+    // Pause any individual stem players
+    document.querySelectorAll('.stem-audio').forEach(a => {
+      a.pause();
+      const b = a.closest('.stem-card')?.querySelector('.play-btn');
+      if (b) { b.textContent = '▶'; b.classList.remove('playing'); }
+    });
+    if (ctx.state === 'suspended') ctx.resume();
+    const gen = ++playGen;
+    const when = ctx.currentTime + 0.05;   // schedule 50 ms ahead — all stems start at identical ctx time
+    const off  = startOffset;
+    stems.forEach(stem => {
+      const src = ctx.createBufferSource();
+      src.buffer = buffers[stem];
+      src.connect(gainNodes[stem]);
+      src.start(when, off);
+      sources[stem] = src;
+    });
+    sources[stems[0]].onended = () => {
+      if (playGen !== gen) return;
+      if (getPosition() >= duration - 0.15) {
+        ppPlaying = false; startOffset = 0;
+        playBtn.textContent = '▶'; playBtn.classList.remove('playing');
+      }
+    };
+    playCtxTime = when;
+    ppPlaying = true;
+    playBtn.textContent = '⏸';
+    playBtn.classList.add('playing');
+  }
+
+  function doPause() {
+    startOffset = getPosition();
+    playGen++;
+    stems.forEach(stem => { try { sources[stem]?.stop(); } catch(_) {} });
+    ppPlaying = false;
+    playBtn.textContent = '▶'; playBtn.classList.remove('playing');
+  }
+
+  function doSeek(t) {
+    const was = ppPlaying;
+    if (was) { playGen++; stems.forEach(stem => { try { sources[stem]?.stop(); } catch(_) {} }); ppPlaying = false; }
+    startOffset = Math.max(0, Math.min(t, duration));
+    if (was) doPlay();
+  }
+
+  // Drag-to-seek — commits only on pointerup; display updates live during drag
+  let seekDragging = false, seekDragTime = null;
+  function seekT(e) {
+    const r = seekWrap.getBoundingClientRect();
+    return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * duration;
+  }
+  function showT(t) {
+    const pct = (t / duration) * 100;
+    seekFill.style.width = pct + '%';
+    seekThumb.style.left = pct + '%';
+    timeEl.textContent = fmt(t) + ' / ' + fmt(duration);
+  }
+  function positionTooltip(clientX, t) {
+    const r = seekWrap.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+    seekTooltip.style.left = (frac * 100) + '%';
+    seekTooltip.textContent = fmt(t);
+  }
+  seekWrap.addEventListener('pointerdown', e => {
+    if (!duration) return;
+    seekDragging = true; seekWrap.classList.add('dragging'); seekWrap.setPointerCapture(e.pointerId);
+    seekDragTime = seekT(e); showT(seekDragTime); positionTooltip(e.clientX, seekDragTime);
+  });
+  seekWrap.addEventListener('pointermove', e => {
+    if (!duration) return;
+    if (seekDragging) {
+      seekDragTime = seekT(e); showT(seekDragTime); positionTooltip(e.clientX, seekDragTime);
+    } else {
+      positionTooltip(e.clientX, seekT(e));
+    }
+  });
+  seekWrap.addEventListener('pointerup', () => {
+    if (!seekDragging) return;
+    seekDragging = false; seekWrap.classList.remove('dragging');
+    if (seekDragTime !== null) doSeek(seekDragTime);
+    seekDragTime = null;
+  });
+
+  // RAF ticker — position display driven by AudioContext clock (no polling audio elements)
+  function startTicker() {
+    function tick() {
+      if (!seekDragging && duration) {
+        const p = getPosition();
+        const pct = (p / duration) * 100;
+        seekFill.style.width = pct + '%';
+        seekThumb.style.left = pct + '%';
+        timeEl.textContent = fmt(p) + ' / ' + fmt(duration);
+      }
+      rafId = requestAnimationFrame(tick);
+    }
+    rafId = requestAnimationFrame(tick);
+  }
+
+  playBtn.addEventListener('click', () => { if (ppPlaying) doPause(); else doPlay(); });
+  restartBtn.addEventListener('click', () => doSeek(0));
+  skipBackBtn.addEventListener('click', () => doSeek(getPosition() - 5));
+  skipFwdBtn.addEventListener('click', () => doSeek(getPosition() + 5));
+
+  card.querySelectorAll('.pp-solo-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const stem = btn.dataset.stem;
+      soloSet.has(stem) ? soloSet.delete(stem) : soloSet.add(stem);
+      btn.classList.toggle('active', soloSet.has(stem));
+      applyVolumes();
+    });
+  });
+
+  card.querySelectorAll('.pp-mute-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const stem = btn.dataset.stem;
+      muteSet.has(stem) ? muteSet.delete(stem) : muteSet.add(stem);
+      btn.classList.toggle('active', muteSet.has(stem));
+      applyVolumes();
+    });
+  });
+
+  card.querySelectorAll('.pp-fader-wrap').forEach(wrap => {
+    const stem = wrap.dataset.stem;
+    const fill  = wrap.querySelector('.pp-fader-fill');
+    const thumb = wrap.querySelector('.pp-fader-thumb');
+    const label = card.querySelector(`.pp-vol-label[data-stem="${stem}"]`);
+    let drag = false;
+    function setF(e) {
+      const r = wrap.getBoundingClientRect();
+      const p = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+      faderVols[stem] = p;
+      fill.style.width = (p * 100) + '%'; thumb.style.left = (p * 100) + '%';
+      if (label) label.textContent = Math.round(p * 100);
+      if (gainNodes) gainNodes[stem].gain.value = computedVol(stem);
+    }
+    wrap.addEventListener('pointerdown', e => { drag = true; wrap.setPointerCapture(e.pointerId); setF(e); });
+    wrap.addEventListener('pointermove', e => { if (drag) setF(e); });
+    wrap.addEventListener('pointerup',   () => { drag = false; });
+  });
+
+  practicePlayer = {
+    pause:   () => { if (ppPlaying) doPause(); },
+    destroy: () => {
+      if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+      playGen++;
+      stems.forEach(stem => { try { sources[stem]?.stop(); } catch(_) {} });
+      if (ctx) { ctx.close().catch(() => {}); ctx = null; }
+      practicePlayer = null;
+    },
+  };
+
+  // ── Async: fetch + decode all stems, then enable transport ─────────────────
+  (async () => {
+    try {
+      ctx = new AudioContext();
+      gainNodes = {};
+      stems.forEach(stem => {
+        gainNodes[stem] = ctx.createGain();
+        gainNodes[stem].gain.value = 1;
+        gainNodes[stem].connect(ctx.destination);
+      });
+
+      buffers = {};
+      let loadedCount = 0;
+      timeEl.textContent = `Loading 0 / ${stems.length}…`;
+
+      async function fetchAndDecode(url) {
+        async function tryFetch(u) {
+          const r = await fetch(u);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return ctx.decodeAudioData(await r.arrayBuffer());
+        }
+        if (url.startsWith('blob:')) return tryFetch(url);
+        // Try direct R2 up to 3 times (CORS config may take a few seconds to propagate after a cold deploy)
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            return await tryFetch(url);
+          } catch (_) {
+            if (attempt < 2) await new Promise(r => setTimeout(r, 1500));
+          }
+        }
+        return tryFetch(`/api/audio-proxy?url=${encodeURIComponent(url)}`); // proxy fallback
+      }
+
+      await Promise.all(stems.map(async stem => {
+        buffers[stem] = await fetchAndDecode(stemFilesMap[stem]);
+        loadedCount++;
+        if (loadedCount < stems.length)
+          timeEl.textContent = `Loading ${loadedCount} / ${stems.length}…`;
+      }));
+
+      duration = buffers[stems[0]].duration;
+      timeEl.textContent = '0:00 / ' + fmt(duration);
+      playBtn.disabled = false;
+      restartBtn.disabled = false;
+      skipBackBtn.disabled = false;
+      skipFwdBtn.disabled = false;
+      gbBtn.disabled = false;
+      seekWrap.style.pointerEvents = '';
+      startTicker();
+    } catch(e) {
+      timeEl.textContent = 'Error loading audio';
+      console.error('Practice mode load error:', e);
+    }
+  })();
+
+  return card;
+}
+
 function pauseAll() {
   document.querySelectorAll('.stem-audio').forEach(a => {
     a.pause();
@@ -945,6 +2285,7 @@ function pauseAll() {
     btn.textContent = '▶';
     btn.classList.remove('playing');
   });
+  if (practicePlayer) practicePlayer.pause();
 }
 
 function fmt(s) {
@@ -952,32 +2293,211 @@ function fmt(s) {
   return `${m}:${sec.toString().padStart(2, '0')}`;
 }
 
-// ── Create share link ──────────────────────────────────────────────────────
-shareBtn.addEventListener('click', async () => {
+// ── Save to library (results-card / karaoke-player) ─────────────────────────
+async function postShare(filesB64, mode, title, artist) {
+  const resp = await fetch('/api/share', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ files: filesB64, mode, title, artist }),
+  });
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json(); // { uuid }
+}
+
+function openSaveModal(pending, heading, defaultArtist, defaultTitle) {
+  pendingSave = pending;
+  modalHeading.textContent = heading;
+  modalArtistEl.value = defaultArtist || '';
+  modalTitleEl.value  = defaultTitle  || '';
+  modalErrorEl.classList.add('hidden');
+  modalSaveBtn.disabled = false;
+  modalSaveBtn.textContent = 'Save';
+  saveModal.classList.remove('hidden');
+  modalTitleEl.focus();
+}
+
+function closeSaveModal() {
+  saveModal.classList.add('hidden');
+  pendingSave = null;
+}
+
+shareBtn.addEventListener('click', () => {
   if (!currentFilesB64) return;
-  shareBtn.disabled = true;
-  shareBtn.textContent = 'Uploading…';
+  const parsed = selectedFile ? parseFilename(selectedFile.name) : { artist: '', title: '' };
+  openSaveModal({ kind: 'new', mode: 'practice' }, 'Save to library', parsed.artist, parsed.title);
+});
+
+kpSaveBtn.addEventListener('click', () => {
+  if (!currentKaraokeFilesB64) return;
+  openSaveModal({ kind: 'new', mode: 'karaoke' }, 'Save to library', karaokeArtistEl.value, karaokeTitleEl.value);
+});
+
+modalCancelBtn.addEventListener('click', closeSaveModal);
+saveModal.addEventListener('click', e => { if (e.target === saveModal) closeSaveModal(); });
+
+modalSaveBtn.addEventListener('click', async () => {
+  if (!pendingSave) return;
+  const title = modalTitleEl.value.trim();
+  const artist = modalArtistEl.value.trim();
+  modalSaveBtn.disabled = true;
+  modalSaveBtn.textContent = 'Saving…';
+  modalErrorEl.classList.add('hidden');
   try {
-    const resp = await fetch('/api/share', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ files: currentFilesB64 }),
-    });
-    if (!resp.ok) throw new Error(await resp.text());
-    const { uuid } = await resp.json();
-    const shareUrl = `${location.origin}/result/${uuid}`;
-    shareUrlEl.value = shareUrl;
-    shareRow.classList.remove('hidden');
-    shareBtn.classList.add('hidden');
-    resultsHint.classList.add('hidden');
+    if (pendingSave.kind === 'rename') {
+      const resp = await fetch(`/api/library/${pendingSave.jobId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, artist }),
+      });
+      if (!resp.ok) throw new Error(await resp.text());
+    } else if (pendingSave.mode === 'practice') {
+      if (!currentFilesB64) throw new Error('Nothing to save — separate a track first.');
+      const { uuid } = await postShare(currentFilesB64, 'practice', title, artist);
+      shareUrlEl.value = `${location.origin}/result/${uuid}`;
+      shareRow.classList.remove('hidden');
+      shareBtn.classList.add('hidden');
+      resultsHint.classList.add('hidden');
+    } else {
+      if (!currentKaraokeFilesB64) throw new Error('Nothing to save — separate a track first.');
+      await postShare(currentKaraokeFilesB64, 'karaoke', title, artist);
+      kpSaveBtn.textContent = '✓ Saved';
+      kpSaveBtn.disabled = true;
+    }
+    closeSaveModal();
+    loadLibrary();
   } catch (e) {
-    shareBtn.disabled = false;
-    shareBtn.textContent = 'Create shareable link';
-    shareBtn.style.borderColor = 'var(--red)';
-    shareBtn.style.color = 'var(--red)';
-    shareBtn.title = String(e);
+    modalSaveBtn.disabled = false;
+    modalSaveBtn.textContent = 'Save';
+    modalErrorEl.textContent = String(e.message || e);
+    modalErrorEl.classList.remove('hidden');
   }
 });
+
+// ── Library ──────────────────────────────────────────────────────────────
+function fmtDate(iso) {
+  try {
+    return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  } catch (_) { return ''; }
+}
+
+function buildLibraryCard(item) {
+  const card = document.createElement('div');
+  card.className = `lib-card mode-${item.mode}`;
+  const badge = item.mode === 'karaoke' ? '🎤 Karaoke' : '🎸 Practice';
+  const titleHtml = item.title
+    ? `<div class="lib-title">${escapeHtml(item.title)}</div>`
+    : `<div class="lib-title untitled">Untitled</div>`;
+  card.innerHTML = `
+    <span class="lib-badge">${badge}</span>
+    ${titleHtml}
+    <div class="lib-artist">${item.artist ? escapeHtml(item.artist) : '&nbsp;'}</div>
+    <div class="lib-meta">
+      <span class="lib-date">${fmtDate(item.created_at)}</span>
+      <div class="lib-actions">
+        <button type="button" class="lib-rename-btn" title="Rename">✎ Rename</button>
+        <button type="button" class="lib-delete-btn" title="Delete">🗑 Delete</button>
+      </div>
+    </div>
+  `;
+  card.querySelector('.lib-rename-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    openSaveModal({ kind: 'rename', jobId: item.job_id }, 'Rename', item.artist, item.title);
+  });
+  card.querySelector('.lib-delete-btn').addEventListener('click', async e => {
+    e.stopPropagation();
+    const label = item.title ? `"${item.title}"` : 'this untitled track';
+    if (!confirm(`Delete ${label} from your library? This can't be undone.`)) return;
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = 'Deleting…';
+    try {
+      const resp = await fetch(`/api/library/${item.job_id}`, { method: 'DELETE' });
+      if (!resp.ok) throw new Error(await resp.text());
+      card.remove();
+      if (!libraryGrid.children.length) {
+        libraryGrid.classList.add('hidden');
+        libraryEmptyEl.classList.remove('hidden');
+      }
+      const remaining = libraryGrid.children.length;
+      libraryCountEl.textContent = remaining ? `${remaining} saved` : '';
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = '🗑 Delete';
+      alert('Delete failed: ' + err.message);
+    }
+  });
+  card.addEventListener('click', () => openResult(item.job_id, item));
+  return card;
+}
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
+
+async function loadLibrary() {
+  try {
+    const resp = await fetch('/api/library');
+    if (!resp.ok) throw new Error(await resp.text());
+    const { items } = await resp.json();
+    libraryGrid.innerHTML = '';
+    items.forEach(item => libraryGrid.appendChild(buildLibraryCard(item)));
+    libraryCountEl.textContent = items.length ? `${items.length} saved` : '';
+    libraryEmptyEl.classList.toggle('hidden', items.length > 0);
+    libraryGrid.classList.toggle('hidden', items.length === 0);
+  } catch (e) {
+    console.warn('Failed to load library:', e);
+    libraryEmptyEl.textContent = 'Could not load your library.';
+    libraryEmptyEl.classList.remove('hidden');
+    libraryGrid.classList.add('hidden');
+  }
+}
+
+// Open a saved job — routes to the practice mixer or the karaoke player
+// depending on its mode. `item` (title/artist/mode) may already be known
+// from the library grid; otherwise it's read from the API response.
+async function openResult(jobId, item = null, pushUrl = true) {
+  if (pushUrl && location.pathname !== `/result/${jobId}`) {
+    history.pushState({}, '', `/result/${jobId}`);
+  }
+  homeView.classList.add('hidden');
+  uploadFlow.classList.add('hidden');
+  progressCard.classList.remove('hidden');
+  resultsCard.classList.add('hidden');
+  karaokePlayerCard.classList.add('hidden');
+  stageLabel.textContent = 'Loading saved track…';
+  stageSub.textContent = '';
+  setPulsing('');
+  try {
+    const resp = await fetch(`/api/result/${jobId}`);
+    if (!resp.ok) throw new Error(`${resp.status} — ${await resp.text()}`);
+    const data = await resp.json();
+    const mode   = item?.mode   || data.mode   || 'practice';
+    const title  = item?.title  || data.title  || null;
+    const artist = item?.artist || data.artist || null;
+
+    if (mode === 'karaoke') {
+      const instrumKey = Object.keys(data.files).find(k => k.includes('instrum') && !k.includes('instrum2'));
+      const vocalsKey  = Object.keys(data.files).find(k => k.includes('vocals'));
+      let chosenCandidate = null;
+      if (instrumKey && vocalsKey) {
+        try {
+          const candidates = await fetchLyricsSearch(artist || '', title || '');
+          const ranked = scoreCandidates(candidates, null);
+          if (ranked.length && ranked[0]._score <= 60) chosenCandidate = ranked[0];
+        } catch (_) { /* no lyrics available — karaoke still plays without them */ }
+      }
+      await showKaraokePlayer(data.files, chosenCandidate, artist, title, true);
+    } else {
+      await showResults(data.files, true);
+      shareUrlEl.value = `${location.origin}/result/${jobId}`;
+      shareRow.classList.remove('hidden');
+    }
+  } catch (e) {
+    showError('Could not load saved track: ' + e.message);
+  }
+}
 
 // ── Copy share link ────────────────────────────────────────────────────────
 copyBtn.addEventListener('click', () => {
@@ -993,7 +2513,8 @@ function showError(msg) {
   progressCard.classList.add('hidden');
   uploadCard.classList.remove('hidden');
   // keep selectedFile so the user can retry without re-uploading
-  submitBtn.disabled = !selectedFile;
+  submitBtn.disabled       = !selectedFile || isKaraokeMode;
+  karaokeStartBtn.disabled = !selectedFile || !isKaraokeMode;
 
   const existing = uploadCard.querySelector('.error-box');
   if (existing) existing.remove();
@@ -1007,11 +2528,13 @@ function showError(msg) {
 // ── Reset ──────────────────────────────────────────────────────────────────
 resetBtn.addEventListener('click', () => {
   if (abortController) { abortController.abort(); abortController = null; }
+  if (practicePlayer) { practicePlayer.destroy(); practicePlayer = null; }
   blobUrls.forEach(u => URL.revokeObjectURL(u));
   blobUrls = [];
   selectedFile = null;
   fileNameEl.textContent = '';
   submitBtn.disabled = true;
+  karaokeStartBtn.disabled = true;
   fileInput.value = '';
   setPulsing('');
   stageSub.textContent = '';
@@ -1021,42 +2544,506 @@ resetBtn.addEventListener('click', () => {
   shareUrlEl.value = '';
   shareBtn.classList.add('hidden');
   shareBtn.disabled = false;
-  shareBtn.textContent = 'Create shareable link';
+  shareBtn.textContent = '💾 Save to library';
   shareBtn.style.borderColor = '';
   shareBtn.style.color = '';
   resultsHint.classList.add('hidden');
   currentFilesB64 = null;
 
-  resultsCard.classList.add('hidden');
-  progressCard.classList.add('hidden');
   uploadCard.classList.remove('hidden');
 
   const box = uploadCard.querySelector('.error-box');
   if (box) box.remove();
+
+  showHome();
 });
 
-// ── Load shared result from /result/<uuid> ────────────────────────────────
+resultsBackBtn.addEventListener('click', () => resetBtn.click());
+
+// ── Karaoke helpers ────────────────────────────────────────────────────────
+
+function parseFilename(name) {
+  const bare = name.replace(/\.\w{2,5}$/, '');
+  const sep = bare.indexOf(' - ');
+  if (sep > 0) return { artist: bare.slice(0, sep).trim(), title: bare.slice(sep + 3).trim() };
+  return { artist: '', title: bare.trim() };
+}
+
+function parseLrc(lrcText) {
+  const RE = /\[(\d{1,3}):(\d{2})\.(\d{1,3})\]/g;
+  let offsetSec = 0;
+  const lines = [];
+
+  for (const rawLine of lrcText.split('\n')) {
+    // Handle [offset:N] metadata (N is milliseconds)
+    const offsetM = rawLine.match(/^\[offset:(-?\d+)\]/i);
+    if (offsetM) { offsetSec = parseInt(offsetM[1], 10) / 1000; continue; }
+    // Skip other metadata tags
+    if (/^\[(?:ar|ti|al|by|length):/.test(rawLine)) continue;
+
+    const text = rawLine.replace(RE, '').trim();
+    if (!text) continue;
+
+    RE.lastIndex = 0;
+    let m;
+    while ((m = RE.exec(rawLine)) !== null) {
+      const mins = parseInt(m[1], 10);
+      const secs = parseInt(m[2], 10);
+      const frac = m[3].length === 1 ? parseInt(m[3], 10) * 100
+                 : m[3].length === 2 ? parseInt(m[3], 10) * 10
+                 : parseInt(m[3], 10);
+      lines.push({ time: mins * 60 + secs + frac / 1000 + offsetSec, text });
+    }
+  }
+  lines.sort((a, b) => a.time - b.time);
+  return lines;
+}
+
+async function fetchLyricsSearch(artist, title) {
+  try {
+    const url = new URL('https://lrclib.net/api/search');
+    if (artist) url.searchParams.set('artist_name', artist);
+    url.searchParams.set('track_name', title || artist);
+    const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.warn('lrclib fetch failed:', e);
+    return [];
+  }
+}
+
+function pickBestCandidate(candidates, audioDuration) {
+  if (!candidates.length) return null;
+  if (!audioDuration) return candidates[0];
+  return candidates.reduce((best, c) =>
+    Math.abs((c.duration || 0) - audioDuration) < Math.abs((best.duration || 0) - audioDuration)
+      ? c : best
+  );
+}
+
+async function getFileDuration(file) {
+  return new Promise(res => {
+    const url = URL.createObjectURL(file);
+    const a = new Audio();
+    a.addEventListener('loadedmetadata', () => { URL.revokeObjectURL(url); res(a.duration); }, { once: true });
+    a.addEventListener('error', () => { URL.revokeObjectURL(url); res(null); }, { once: true });
+    a.src = url;
+  });
+}
+
+function scoreCandidates(candidates, duration) {
+  return candidates.map(c => ({
+    ...c,
+    _score: duration ? Math.abs((c.duration || 0) - duration) : 0,
+  })).sort((a, b) => a._score - b._score);
+}
+
+function showLyricsPicker(ranked, songTitle) {
+  return new Promise(resolve => {
+    lyricPickerTitle.textContent = songTitle || '';
+    lyricPickerList.innerHTML = '';
+
+    ranked.forEach((c, idx) => {
+      const row = document.createElement('div');
+      const isBest = idx === 0;
+      row.className = 'lyrics-candidate' + (isBest ? ' best-match' : '');
+      const mins = Math.floor((c.duration || 0) / 60);
+      const secs = Math.floor((c.duration || 0) % 60);
+      const durStr = c.duration ? `${mins}:${secs.toString().padStart(2,'0')}` : '';
+      const isSynced = !!c.syncedLyrics;
+      row.innerHTML = `
+        <div class="lc-meta">
+          <span class="lc-title">${c.trackName || ''}</span>
+          <span class="lc-artist">${[c.artistName, c.albumName].filter(Boolean).join(' · ')}</span>
+          <div class="lc-info-row">
+            ${durStr ? `<span class="lc-dur">${durStr}</span>` : ''}
+            <span class="lc-badge${isSynced ? '' : ' plain'}">${isSynced ? 'synced' : 'plain'}</span>
+            ${isBest ? '<span class="lc-best-badge">best match</span>' : ''}
+          </div>
+        </div>
+        <button class="lc-pick-btn">Use this</button>
+      `;
+      row.querySelector('.lc-pick-btn').addEventListener('click', () => {
+        lyricPickerCard.classList.add('hidden');
+        resolve(c);
+      });
+      lyricPickerList.appendChild(row);
+    });
+
+    lyricPickerSkip.onclick = () => {
+      lyricPickerCard.classList.add('hidden');
+      resolve(null);
+    };
+
+    uploadCard.classList.add('hidden');
+    lyricPickerCard.classList.remove('hidden');
+  });
+}
+
+// ── Karaoke start ──────────────────────────────────────────────────────────
+karaokeStartBtn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+
+  const artist = karaokeArtistEl.value.trim();
+  const title  = karaokeTitleEl.value.trim();
+
+  karaokeStartBtn.disabled = true;
+
+  // Phase 1: get file duration + fetch lyrics candidates in parallel (fast)
+  const [duration, candidates] = await Promise.all([
+    getFileDuration(selectedFile),
+    fetchLyricsSearch(artist, title),
+  ]);
+
+  const ranked = scoreCandidates(candidates, duration);
+  const needsPicker = ranked.length > 0 && (
+    ranked.length === 1
+      ? ranked[0]._score > 15
+      : (ranked[1]._score - ranked[0]._score < 8 || ranked[0]._score > 15)
+  );
+
+  let chosenCandidate;
+  if (!ranked.length || ranked[0]._score > 60) {
+    chosenCandidate = null;
+  } else if (!needsPicker) {
+    chosenCandidate = ranked[0];
+  } else {
+    chosenCandidate = await showLyricsPicker(ranked.slice(0, 6), title);
+  }
+
+  // Phase 2: start separation
+  startKaraokeSeparation(selectedFile, chosenCandidate, artist, title);
+});
+
+function startKaraokeSeparation(file, chosenCandidate, artist, title) {
+  const opts = {
+    cpu:                 cpuCheck.checked,
+    vocals_only:         true,
+    use_BSRoformer6Stem: false,
+    use_BSRoformer:      false,
+    use_Kim_MelRoformer: true,
+    use_InstVoc:         false,
+    use_VitLarge:        false,
+    use_VOCFT:           false,
+    use_InstHQ4:         false,
+    BigShifts:           1,
+    output_format:       'FLAC',
+    input_gain:          0,
+    restore_gain:        false,
+    filter_vocals:       false,
+  };
+
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('options', JSON.stringify(opts));
+
+  uploadCard.classList.add('hidden');
+  lyricPickerCard.classList.add('hidden');
+  progressCard.classList.remove('hidden');
+  stageLabel.textContent = 'Separating vocals…';
+  stageSub.textContent = '';
+  setPulsing();
+  logArea.textContent = '';
+
+  abortController = new AbortController();
+  fetch('/api/separate', {
+    method: 'POST', body: fd, signal: abortController.signal,
+  }).then(resp => {
+    if (!resp.ok) { showError('Server error: ' + resp.statusText); return; }
+    return readSSEStreamKaraoke(resp.body, opts, chosenCandidate, artist, title);
+  }).catch(e => {
+    if (e.name !== 'AbortError') showError(String(e));
+  });
+}
+
+async function readSSEStreamKaraoke(body, opts, chosenCandidate, artist, title) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      let msg;
+      try { msg = JSON.parse(line.slice(6)); } catch (_) { continue; }
+      if (msg.type === 'log') {
+        updateStageFromLog(msg.message);
+        appendLog(msg.message);
+      } else if (msg.type === 'progress') {
+        setShiftProgress(msg.n, msg.total);
+      } else if (msg.type === 'done') {
+        progBar.classList.remove('pulsing');
+        progBar.style.width = '100%';
+        await showKaraokePlayer(msg.files, chosenCandidate, artist, title);
+      } else if (msg.type === 'error') {
+        showError(msg.message);
+      }
+    }
+  }
+}
+
+async function showKaraokePlayer(files, chosenCandidate, artist, title, fromShare = false) {
+  kpBlobUrls.forEach(u => URL.revokeObjectURL(u));
+  kpBlobUrls = [];
+
+  function mkBlobUrl(b64, ext) {
+    const mime = ext === 'mp3' ? 'audio/mpeg' : 'audio/flac';
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+    kpBlobUrls.push(url);
+    return url;
+  }
+
+  const instrumKey = Object.keys(files).find(k => k.includes('instrum') && !k.includes('instrum2'));
+  const vocalsKey  = Object.keys(files).find(k => k.includes('vocals'));
+
+  const instrumUrl = fromShare ? files[instrumKey] : mkBlobUrl(files[instrumKey], instrumKey.split('.').pop());
+  const vocalsUrl  = fromShare ? files[vocalsKey]  : mkBlobUrl(files[vocalsKey],  vocalsKey.split('.').pop());
+
+  kpAudioInstrum.src = instrumUrl;
+  kpAudioVocals.src  = vocalsUrl;
+  kpDlInstrum.href = instrumUrl; kpDlInstrum.download = instrumKey;
+  kpDlVocals.href  = vocalsUrl;  kpDlVocals.download  = vocalsKey;
+
+  kpSongTitle.textContent  = title  || 'Unknown Title';
+  kpSongArtist.textContent = artist || 'Unknown Artist';
+
+  currentKaraokeFilesB64 = fromShare ? null : files;
+  kpSaveBtn.classList.toggle('hidden', fromShare);
+
+  homeView.classList.add('hidden');
+  uploadFlow.classList.add('hidden');
+  progressCard.classList.add('hidden');
+  karaokePlayerCard.classList.remove('hidden');
+
+  const lyricsData = chosenCandidate
+    ? { synced: chosenCandidate.syncedLyrics || null, plain: chosenCandidate.plainLyrics || null }
+    : { synced: null, plain: null };
+
+  setupLyrics(lyricsData);
+  setupVocalsToggle();
+  setupTransport();
+}
+
+// ── Lyrics rendering ───────────────────────────────────────────────────────
+
+function setupLyrics(lyricsData) {
+  lrcLines = [];
+  kpLyricsPanel.innerHTML = '';
+
+  if (!lyricsData.synced && !lyricsData.plain) {
+    kpLyricsPanel.innerHTML = '<div class="lyrics-notice">No synced lyrics found for this track.</div>';
+    return;
+  }
+  if (!lyricsData.synced) {
+    // Plain lyrics fallback — static, scrollable
+    const pre = document.createElement('pre');
+    pre.style.cssText = 'white-space:pre-wrap;font-family:inherit;font-size:.9rem;color:var(--muted);padding:.75rem 0;';
+    pre.textContent = lyricsData.plain;
+    kpLyricsPanel.appendChild(pre);
+    return;
+  }
+
+  lrcLines = parseLrc(lyricsData.synced);
+  const spacer1 = document.createElement('div');
+  spacer1.className = 'kp-lyrics-spacer';
+  kpLyricsPanel.appendChild(spacer1);
+  lrcLines.forEach((line, i) => {
+    const el = document.createElement('div');
+    el.className = 'lyric-line';
+    el.textContent = line.text;
+    el.addEventListener('click', async () => {
+      const wasPlaying = !kpAudioInstrum.paused;
+      const ver = ++seekVersion;
+      seekPending = true;
+      karaokeActiveLine = -1;
+      userHoverLyrics = false;
+      lyricJustClicked = true;
+      setTimeout(() => { lyricJustClicked = false; }, 1500);
+      el.scrollIntoView({ block: 'center', behavior: 'instant' });
+      kpAudioInstrum.pause();
+      kpAudioVocals.pause();
+      // Seek both simultaneously; wait for both to confirm seeked before playing
+      await Promise.all([
+        seekAudio(kpAudioInstrum, line.time),
+        seekAudio(kpAudioVocals, line.time),
+      ]);
+      if (ver !== seekVersion) return; // a newer click superseded this one
+      seekPending = false;
+      if (wasPlaying) {
+        kpAudioInstrum.play();
+        kpAudioVocals.play().catch(() => {});
+        kpPlayBtn.textContent = '⏸';
+        kpPlayBtn.classList.add('playing');
+      }
+    });
+    kpLyricsPanel.appendChild(el);
+  });
+  const spacer2 = document.createElement('div');
+  spacer2.className = 'kp-lyrics-spacer';
+  kpLyricsPanel.appendChild(spacer2);
+}
+
+// ── Vocals toggle ──────────────────────────────────────────────────────────
+
+function setupVocalsToggle() {
+  kpVocalsCheck.checked = false;
+  kpAudioVocals.volume = 0;
+
+  if (!karaokeListenersSetup) {
+    kpVocalsCheck.addEventListener('change', () => {
+      kpAudioVocals.volume = kpVocalsCheck.checked ? 1 : 0;
+    });
+  }
+}
+
+// ── Transport + RAF loop ───────────────────────────────────────────────────
+
+function setupTransport() {
+  karaokeActiveLine = -1;
+  if (karaokeRafId) { cancelAnimationFrame(karaokeRafId); karaokeRafId = null; }
+
+  if (!karaokeListenersSetup) {
+    // Play / pause button — operate both tracks directly
+    kpPlayBtn.addEventListener('click', () => {
+      if (kpAudioInstrum.paused) {
+        kpAudioInstrum.play();
+        kpAudioVocals.play().catch(() => {});
+        kpPlayBtn.textContent = '⏸';
+        kpPlayBtn.classList.add('playing');
+      } else {
+        kpAudioInstrum.pause();
+        kpAudioVocals.pause();
+        kpPlayBtn.textContent = '▶';
+        kpPlayBtn.classList.remove('playing');
+      }
+    });
+
+    kpAudioInstrum.addEventListener('ended', () => {
+      kpPlayBtn.textContent = '▶';
+      kpPlayBtn.classList.remove('playing');
+      karaokeActiveLine = -1;
+    });
+
+    // Seek bar — click
+    kpSeekBg.addEventListener('click', e => {
+      if (!kpAudioInstrum.duration) return;
+      const t = (e.offsetX / kpSeekBg.offsetWidth) * kpAudioInstrum.duration;
+      kpAudioInstrum.currentTime = t;
+      kpAudioVocals.currentTime = t;
+    });
+    // Seek bar — drag
+    let isSeeking = false;
+    kpSeekBg.addEventListener('pointerdown', e => { isSeeking = true; kpSeekBg.setPointerCapture(e.pointerId); });
+    kpSeekBg.addEventListener('pointermove', e => {
+      if (!isSeeking || !kpAudioInstrum.duration) return;
+      const t = Math.max(0, Math.min(1, e.offsetX / kpSeekBg.offsetWidth)) * kpAudioInstrum.duration;
+      kpAudioInstrum.currentTime = t;
+      kpAudioVocals.currentTime = t;
+    });
+    kpSeekBg.addEventListener('pointerup', () => { isSeeking = false; });
+
+    // Pause auto-scroll while hovering; lyric click suppresses re-enable for 1.5s
+    kpLyricsPanel.addEventListener('mouseenter', () => { if (!lyricJustClicked) userHoverLyrics = true; });
+    kpLyricsPanel.addEventListener('mouseleave', () => { userHoverLyrics = false; });
+
+    karaokeListenersSetup = true;
+  }
+
+  // RAF tick — always restarted fresh
+  function tick() {
+    const t = kpAudioInstrum.currentTime;
+    const d = kpAudioInstrum.duration || 0;
+    if (d) kpSeekFill.style.width = ((t / d) * 100) + '%';
+    kpTimeEl.textContent = fmt(t) + ' / ' + fmt(d);
+    if (lrcLines.length > 0) syncLyricLine(t);
+    karaokeRafId = requestAnimationFrame(tick);
+  }
+  karaokeRafId = requestAnimationFrame(tick);
+}
+
+function syncLyricLine(t) {
+  if (seekPending) return;
+  // Binary search for current line
+  let lo = 0, hi = lrcLines.length - 1, cur = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (lrcLines[mid].time <= t) { cur = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  if (cur === karaokeActiveLine) return;
+  karaokeActiveLine = cur;
+
+  const lineEls = kpLyricsPanel.querySelectorAll('.lyric-line');
+  lineEls.forEach((el, i) => {
+    el.classList.toggle('active', i === cur);
+    el.classList.toggle('past',   i < cur);
+  });
+  if (cur >= 0 && lineEls[cur]?.isConnected && (!userHoverLyrics || lyricJustClicked))
+    lineEls[cur].scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+// ── Karaoke reset ──────────────────────────────────────────────────────────
+
+kpResetBtn.addEventListener('click', () => {
+  if (karaokeRafId) { cancelAnimationFrame(karaokeRafId); karaokeRafId = null; }
+  kpAudioInstrum.pause(); kpAudioVocals.pause();
+  kpAudioInstrum.src = ''; kpAudioVocals.src = '';
+  kpBlobUrls.forEach(u => URL.revokeObjectURL(u));
+  kpBlobUrls = [];
+  lrcLines = [];
+  karaokeActiveLine = -1;
+  kpPlayBtn.textContent = '▶';
+  kpPlayBtn.classList.remove('playing');
+  kpSeekFill.style.width = '0%';
+  kpTimeEl.textContent = '0:00 / 0:00';
+  kpLyricsPanel.innerHTML = '';
+
+  karaokePlayerCard.classList.add('hidden');
+  uploadCard.classList.remove('hidden');
+  selectedFile = null;
+  fileNameEl.textContent = '';
+  fileInput.value = '';
+  karaokeStartBtn.disabled = true;
+  karaokeArtistEl.value = '';
+  karaokeTitleEl.value  = '';
+  currentKaraokeFilesB64 = null;
+
+  const box = uploadCard.querySelector('.error-box');
+  if (box) box.remove();
+
+  showHome();
+});
+
+kpBackBtn.addEventListener('click', () => kpResetBtn.click());
+
+// ── Startup: load a shared result from /result/<uuid>, or show the library ──
 (async () => {
   const pathMatch = location.pathname.match(/\/result\/([^/]+)/);
   const uuid = pathMatch ? pathMatch[1] : null;
-  if (!uuid) return;
-  uploadCard.classList.add('hidden');
-  progressCard.classList.remove('hidden');
-  stageLabel.textContent = 'Loading shared stems…';
-  try {
-    const resp = await fetch(`/api/result/${uuid}`);
-    if (!resp.ok) {
-      const body = await resp.text();
-      throw new Error(`${resp.status} — ${body}`);
-    }
-    const { files } = await resp.json();
-    showResults(files, true);
-    shareUrlEl.value = location.href;
-    shareRow.classList.remove('hidden');
-  } catch (e) {
-    showError('Could not load shared result: ' + e.message);
+  if (uuid) {
+    await openResult(uuid, null, false);
+  } else {
+    loadLibrary();
   }
 })();
+
+// ── Browser back/forward between the library and a /result/<uuid> page ─────
+window.addEventListener('popstate', () => {
+  const pathMatch = location.pathname.match(/\/result\/([^/]+)/);
+  const uuid = pathMatch ? pathMatch[1] : null;
+  if (uuid) {
+    openResult(uuid, null, false);
+  } else {
+    showHome(false);
+  }
+});
 </script>
 </body>
 </html>

@@ -41,8 +41,19 @@ gpu_image = (
 # ── Web image — FastAPI only ───────────────────────────────────────────────
 web_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("ffmpeg")  # for FLAC → MP3 conversion
-    .pip_install("fastapi[standard]", "python-multipart", "boto3")
+    .apt_install("ffmpeg", "curl", "gnupg")
+    .run_commands(
+        # yt-dlp's EJS n-challenge solver needs a Node version it still supports;
+        # yt-dlp marks older LTS lines "unsupported" and skips JS-challenge solving
+        # entirely (silently degrading to LOGIN_REQUIRED errors even with cookies).
+        "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
+        "apt-get install -y nodejs",
+    )
+    # yt-dlp pinned (not left open-ended): Modal caches this layer by command text, so an
+    # unpinned install silently keeps serving whatever version was resolved at first build.
+    # YouTube's extractor requirements shift often enough that a stale yt-dlp starts failing
+    # with LOGIN_REQUIRED/403 even with valid cookies. Bump this pin to force a rebuild.
+    .pip_install("fastapi[standard]", "python-multipart", "boto3", "yt-dlp[default]==2026.8.19")
     .add_local_dir("static", remote_path="/app/static")
 )
 
@@ -51,7 +62,7 @@ web_image = (
 
 @app.function(
     image=gpu_image,
-    gpu="A10G",
+    gpu="H100",
     timeout=3600,
     volumes={"/app/models": model_volume},
 )
@@ -148,19 +159,21 @@ def separate(audio_bytes: bytes, options_dict: dict):
     image=web_image,
     timeout=3600,
     scaledown_window=300,
-    secrets=[modal.Secret.from_name("cloudflare-r2")],
+    secrets=[modal.Secret.from_name("cloudflare-r2"), modal.Secret.from_name("yt-cookies")],
 )
 @modal.asgi_app()
 def fastapi_app():
     import asyncio
     import base64
+    import datetime as _dt
     import json
+    import re
     import uuid
 
     import boto3
     from botocore.config import Config
     from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-    from fastapi.responses import FileResponse, StreamingResponse
+    from fastapi.responses import FileResponse, Response, StreamingResponse
     from fastapi.staticfiles import StaticFiles
 
     web = FastAPI(title="Neiro")
@@ -176,7 +189,7 @@ def fastapi_app():
             config=Config(s3={"addressing_style": "path"}),
         )
 
-    def _upload_to_r2(files: dict) -> str:
+    def _upload_to_r2(files: dict, mode: str = None, title: str = None, artist: str = None) -> str:
         r2 = _get_r2()
         bucket = os.environ["R2_BUCKET_NAME"]
         job_id = str(uuid.uuid4())
@@ -187,7 +200,13 @@ def fastapi_app():
                 Body=base64.b64decode(b64),
                 ContentType="audio/mpeg" if fname.endswith(".mp3") else "application/octet-stream",
             )
-        manifest = json.dumps({"files": list(files.keys())})
+        manifest = json.dumps({
+            "files": list(files.keys()),
+            "mode": mode if mode in ("karaoke", "practice") else "practice",
+            "title": title or None,
+            "artist": artist or None,
+            "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        })
         r2.put_object(
             Bucket=bucket,
             Key=f"results/{job_id}/manifest.json",
@@ -195,6 +214,68 @@ def fastapi_app():
             ContentType="application/json",
         )
         return job_id
+
+    def _list_library() -> list:
+        r2 = _get_r2()
+        bucket = os.environ["R2_BUCKET_NAME"]
+        items = []
+        paginator = r2.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix="results/"):
+            for obj in page.get("Contents", []):
+                if not obj["Key"].endswith("/manifest.json"):
+                    continue
+                job_id = obj["Key"].split("/")[1]
+                try:
+                    manifest = json.loads(r2.get_object(Bucket=bucket, Key=obj["Key"])["Body"].read())
+                except Exception:
+                    continue
+                files = manifest.get("files", [])
+                items.append({
+                    "job_id": job_id,
+                    "title": manifest.get("title"),
+                    "artist": manifest.get("artist"),
+                    "mode": manifest.get("mode") or ("karaoke" if len(files) <= 2 else "practice"),
+                    "created_at": manifest.get("created_at") or obj["LastModified"].isoformat(),
+                    "stems": sorted({f.rsplit(".", 1)[0].split("_")[-1] for f in files}),
+                })
+        items.sort(key=lambda x: x["created_at"], reverse=True)
+        return items
+
+    def _update_manifest(job_id: str, data: dict) -> dict:
+        r2 = _get_r2()
+        bucket = os.environ["R2_BUCKET_NAME"]
+        key = f"results/{job_id}/manifest.json"
+        manifest = json.loads(r2.get_object(Bucket=bucket, Key=key)["Body"].read())
+        if "title" in data:
+            manifest["title"] = data["title"] or None
+        if "artist" in data:
+            manifest["artist"] = data["artist"] or None
+        if data.get("mode") in ("karaoke", "practice"):
+            manifest["mode"] = data["mode"]
+        manifest.setdefault("created_at", _dt.datetime.now(_dt.timezone.utc).isoformat())
+        r2.put_object(Bucket=bucket, Key=key, Body=json.dumps(manifest).encode(), ContentType="application/json")
+        return manifest
+
+    def _delete_job(job_id: str) -> None:
+        r2 = _get_r2()
+        bucket = os.environ["R2_BUCKET_NAME"]
+        prefix = f"results/{job_id}/"
+        r2.head_object(Bucket=bucket, Key=f"{prefix}manifest.json")  # 404s if the job doesn't exist
+        paginator = r2.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            keys = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+            if keys:
+                r2.delete_objects(Bucket=bucket, Delete={"Objects": keys})
+
+    # Configure R2 CORS once at startup so browsers can fetch audio directly
+    try:
+        _get_r2().put_bucket_cors(
+            Bucket=os.environ["R2_BUCKET_NAME"],
+            CORSConfiguration={"CORSRules": [{"AllowedHeaders": ["*"], "AllowedMethods": ["GET", "HEAD"],
+                                               "AllowedOrigins": ["*"], "MaxAgeSeconds": 86400}]},
+        )
+    except Exception:
+        pass
 
     DEFAULTS: dict = {
         "large_gpu": False,
@@ -231,7 +312,7 @@ def fastapi_app():
     def _flac_to_mp3(flac_path: str) -> str:
         mp3_path = flac_path[:-5] + ".mp3"
         subprocess.run(
-            ["ffmpeg", "-y", "-i", flac_path, "-q:a", "2", mp3_path],
+            ["ffmpeg", "-y", "-i", flac_path, "-b:a", "192k", "-ar", "44100", mp3_path],
             capture_output=True, check=True,
         )
         return mp3_path
@@ -248,6 +329,88 @@ def fastapi_app():
                 break
             yield f"data: {json.dumps(msg)}\n\n"
 
+    _YT_JUNK = re.compile(
+        r'\s*[\(\[]\s*(?:official\s+)?(?:music\s+)?'
+        r'(?:video|audio|lyrics?|hq|4k|mv|visualizer|live|clip|explicit)\s*[\)\]]\s*',
+        re.IGNORECASE,
+    )
+    _YT_RE = re.compile(r'^https?://(www\.)?(youtube\.com/watch|youtu\.be/|youtube\.com/shorts/)')
+
+    def _clean_yt_title(title: str) -> str:
+        return re.sub(r'\s+', ' ', _YT_JUNK.sub('', title)).strip()
+
+    def _yt_url_ok(url: str) -> bool:
+        return bool(_YT_RE.match(url.strip()))
+
+    def _download_yt(url: str) -> tuple[bytes, str]:
+        import json, subprocess as _sp, sys, tempfile as _tf
+
+        _cookies_content = os.environ.get("YT_COOKIES_CONTENT", "").strip()
+        _cookies_tmp = None
+        if _cookies_content:
+            _cfd, _cookies_tmp = _tf.mkstemp(suffix='.txt', prefix='yt-cookies-')
+            try:
+                os.write(_cfd, _cookies_content.encode())
+            finally:
+                os.close(_cfd)
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                outtmpl = os.path.join(tmp, 'audio.%(ext)s')
+
+                cmd = [
+                    sys.executable, '-m', 'yt_dlp',
+                    '--format', 'bestaudio/bestaudio*/best',
+                    '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '2',
+                    '--output', outtmpl,
+                    '--write-info-json',
+                    '--no-playlist',
+                    '--quiet', '--no-warnings',
+                    '--js-runtimes', 'node',
+                    '--extractor-args', 'youtube:player_client=ios,android,mweb',
+                ]
+                if _cookies_tmp:
+                    cmd += ['--cookies', _cookies_tmp]
+                cmd += ['--concurrent-fragments', '4']
+                cmd.append(url)
+
+                result = _sp.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+
+                title = 'Unknown'
+                for fname in os.listdir(tmp):
+                    if fname.endswith('.info.json'):
+                        with open(os.path.join(tmp, fname)) as fh:
+                            title = json.load(fh).get('title', 'Unknown')
+                        break
+
+                with open(os.path.join(tmp, 'audio.mp3'), 'rb') as fh:
+                    return fh.read(), title
+        finally:
+            if _cookies_tmp:
+                try:
+                    os.unlink(_cookies_tmp)
+                except OSError:
+                    pass
+
+    @web.post("/api/youtube")
+    async def api_youtube(request: Request):
+        data = await request.json()
+        url = (data.get("url") or "").strip()
+        if not _yt_url_ok(url):
+            raise HTTPException(status_code=400, detail="Only YouTube URLs are accepted")
+        try:
+            audio_bytes, raw_title = await asyncio.get_event_loop().run_in_executor(
+                None, _download_yt, url
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Download failed: {e}")
+        title = _clean_yt_title(raw_title)
+        safe = re.sub(r'[<>:"/\\|?*]', '', title).strip() or 'audio'
+        filename = safe + '.mp3'
+        return {"audio": base64.b64encode(audio_bytes).decode(), "filename": filename, "title": title}
+
     @web.get("/")
     async def index():
         return FileResponse("/app/static/index.html")
@@ -261,11 +424,51 @@ def fastapi_app():
         data = await request.json()
         try:
             job_id = await asyncio.get_event_loop().run_in_executor(
-                None, _upload_to_r2, data["files"]
+                None, _upload_to_r2, data["files"], data.get("mode"), data.get("title"), data.get("artist"),
             )
             return {"uuid": job_id}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    @web.get("/api/library")
+    async def api_library():
+        try:
+            items = await asyncio.get_event_loop().run_in_executor(None, _list_library)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"items": items}
+
+    @web.patch("/api/library/{job_id}")
+    async def api_library_rename(job_id: str, request: Request):
+        data = await request.json()
+        try:
+            manifest = await asyncio.get_event_loop().run_in_executor(None, _update_manifest, job_id, data)
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"Not found: {e}")
+        return manifest
+
+    @web.delete("/api/library/{job_id}")
+    async def api_library_delete(job_id: str):
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, _delete_job, job_id)
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"Not found: {e}")
+        return {"deleted": job_id}
+
+    @web.get("/api/audio-proxy")
+    async def audio_proxy(url: str):
+        import asyncio
+        import urllib.request
+        try:
+            def _fetch():
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    return r.read(), r.headers.get("Content-Type", "audio/flac")
+            data, ct = await asyncio.to_thread(_fetch)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        return Response(content=data, media_type=ct,
+                        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600"})
 
     @web.get("/api/result/{job_id}")
     async def get_result(job_id: str):
@@ -285,7 +488,12 @@ def fastapi_app():
             )
             for fname in manifest["files"]
         }
-        return {"files": urls}
+        return {
+            "files": urls,
+            "mode": manifest.get("mode") or ("karaoke" if len(manifest["files"]) <= 2 else "practice"),
+            "title": manifest.get("title"),
+            "artist": manifest.get("artist"),
+        }
 
     @web.post("/api/separate")
     async def api_separate(
@@ -300,25 +508,32 @@ def fastapi_app():
 
         q: asyncio.Queue = asyncio.Queue()
 
+        loop = asyncio.get_event_loop()
+
+        async def _convert(fname, b64, fpath):
+            if fname.endswith(".flac"):
+                try:
+                    mp3 = await loop.run_in_executor(None, _flac_to_mp3, fpath)
+                    with open(mp3, "rb") as fh:
+                        return (os.path.basename(mp3), base64.b64encode(fh.read()).decode())
+                except Exception:
+                    return (fname, b64)
+            return (fname, b64)
+
         async def _task():
             try:
                 async for msg in separate.remote_gen.aio(audio_bytes, opts):
                     if msg.get("type") == "result":
                         files: dict[str, str] = {}
                         with tempfile.TemporaryDirectory() as td:
+                            entries = []
                             for fname, b64 in msg["files"].items():
                                 fpath = os.path.join(td, fname)
                                 with open(fpath, "wb") as fh:
                                     fh.write(base64.b64decode(b64))
-                                if fname.endswith(".flac"):
-                                    try:
-                                        mp3 = _flac_to_mp3(fpath)
-                                        with open(mp3, "rb") as fh:
-                                            files[os.path.basename(mp3)] = base64.b64encode(fh.read()).decode()
-                                    except Exception:
-                                        files[fname] = b64
-                                else:
-                                    files[fname] = b64
+                                entries.append((fname, b64, fpath))
+                            results = await asyncio.gather(*[_convert(f, b, p) for f, b, p in entries])
+                            files = dict(results)
                         await q.put({"type": "done", "files": files})
                     else:
                         await q.put(msg)
