@@ -16,7 +16,8 @@ mostly stable library code; day-to-day work happens in `app.py`, `modal_app.py`,
 ```bash
 make setup    # uv sync --extra web — installs deps into .venv
 make web      # uv run uvicorn app:app --reload --port 8000 — local CPU dev server
-make deploy   # uv run modal deploy modal_app.py — deploy full stack to Modal (GPU)
+make deploy   # deploys to Modal (GPU) under both the "neiro" and legacy "song-lab" app
+              # names, so previously shared song-lab URLs keep working
 make run INPUT=song.mp3 [OUTPUT=./output] [CPU=1]   # CLI separation via inference.py
 make clean    # remove .venv, __pycache__, output/
 ```

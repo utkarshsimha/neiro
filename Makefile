@@ -1,4 +1,4 @@
-.PHONY: setup sync run web deploy clean help yt-cookies
+.PHONY: setup sync run web deploy deploy-legacy clean help yt-cookies
 
 # Default target
 help:
@@ -31,8 +31,12 @@ web: ## Run local dev server on :8000
 	uv sync --extra web
 	uv run uvicorn app:app --reload --port 8000
 
-deploy: ## Deploy to Modal (GPU)
+deploy: ## Deploy to Modal (GPU), under both the current and legacy app name
 	uv run modal deploy modal_app.py
+	$(MAKE) deploy-legacy
+
+deploy-legacy: ## Redeploy the same code under the old "song-lab" app name, so old shared links keep working
+	uv run modal deploy modal_app.py --name song-lab
 
 # Usage: make yt-cookies FILE=~/.neiro-yt-cookies.txt
 FILE ?= $(HOME)/.neiro-yt-cookies.txt
