@@ -6,6 +6,14 @@ Neiro is a collection of tools for analysing songs. It lets you peer inside a pi
 
 ---
 
+## Screenshots
+
+| Library | Practice mode |
+|---|---|
+| ![Neiro library view](docs/screenshots/library.png) | ![Practice mode stem player](docs/screenshots/practice-mode.png) |
+
+---
+
 ## Supported tasks
 
 ### Song stem separation
