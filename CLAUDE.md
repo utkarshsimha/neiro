@@ -67,10 +67,11 @@ directly in a background thread.
    `manifest.json` listing filenames; `GET /api/result/{job_id}` returns presigned GET URLs
    (24h expiry). R2 is optional — configured via `.env` locally (`cp .env.example .env`) or a
    `cloudflare-r2` Modal secret in production; share links silently unavailable if unset.
-6. YouTube ingestion (`/api/youtube`) shells out to `yt_dlp` as a subprocess (needs Node ≥20 for
-   the JS challenge solver), strips "(Official Video)"-style junk from titles, and requires
-   either a cookies file (`YOUTUBE_COOKIES_FILE` env var or `~/.neiro-yt-cookies.txt`) or
-   `--cookies-from-browser` to get past bot checks.
+6. YouTube ingestion (`/api/youtube`) calls a self-hosted Cobalt instance (`cobalt_app.py`, a
+   separate Modal app — see there for why: yt-dlp run directly from Modal's IPs kept tripping
+   bot checks) over HTTP, and strips "(Official Video)"-style junk from titles. Both `app.py`
+   and `modal_app.py` need `COBALT_URL` / `COBALT_API_KEY` set (`.env` locally, the `cobalt`
+   Modal secret in production — `make deploy-cobalt` deploys Cobalt and creates that secret).
 
 ### Separation pipeline (`inference.py`)
 

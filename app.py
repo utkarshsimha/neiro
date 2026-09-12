@@ -115,78 +115,50 @@ def _yt_url_ok(url: str) -> bool:
     return bool(_YT_RE.match(url.strip()))
 
 
-_YT_COOKIES_HELP = (
-    "YouTube requires browser cookies to download audio.\n\n"
-    "Fix (one-time setup):\n"
-    "  1. Install the 'Get cookies.txt LOCALLY' browser extension\n"
-    "  2. Open a private/incognito window and log into YouTube\n"
-    "  3. Visit https://www.youtube.com/robots.txt\n"
-    "  4. Click the extension icon → Export cookies for youtube.com\n"
-    "  5. Save the file to: ~/.neiro-yt-cookies.txt\n"
-    "  6. Close the private window\n\n"
-    "Or set the YOUTUBE_COOKIES_FILE env var to point at your cookies file."
-)
-
-
-def _yt_cookies_path() -> str | None:
-    """Return path to a cookies file if one is configured / exists."""
-    env = os.environ.get("YOUTUBE_COOKIES_FILE", "").strip()
-    if env and os.path.isfile(env):
-        return env
-    default = os.path.expanduser("~/.neiro-yt-cookies.txt")
-    if os.path.isfile(default):
-        return default
-    return None
-
-
 def _download_yt(url: str) -> tuple[bytes, str]:
+    """Extract audio via a self-hosted Cobalt instance (see cobalt_app.py)."""
     import json
-    import platform
-    import sys
+    import urllib.error
+    import urllib.request
 
-    cookies_path = _yt_cookies_path()
+    cobalt_url = os.environ.get("COBALT_URL", "").rstrip("/")
+    if not cobalt_url:
+        raise RuntimeError(
+            "COBALT_URL is not configured — deploy cobalt_app.py and set "
+            "COBALT_URL / COBALT_API_KEY (see .env.example)."
+        )
 
-    with tempfile.TemporaryDirectory() as tmp:
-        outtmpl = os.path.join(tmp, 'audio.%(ext)s')
+    req = urllib.request.Request(
+        cobalt_url + "/",
+        data=json.dumps({
+            "url": url,
+            "downloadMode": "audio",
+            "audioFormat": "mp3",
+            "audioBitrate": "320",
+            "filenameStyle": "pretty",
+        }).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Api-Key {os.environ.get('COBALT_API_KEY', '')}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            meta = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Cobalt request failed: {e.read().decode(errors='replace')}")
 
-        # Use subprocess so --js-runtimes node reaches the CLI exactly as tested
-        cmd = [
-            sys.executable, '-m', 'yt_dlp',
-            '--format', 'bestaudio/bestaudio*/best',
-            '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '2',
-            '--output', outtmpl,
-            '--write-info-json',
-            '--no-playlist',
-            '--quiet', '--no-warnings',
-            '--js-runtimes', 'node',
-            '--extractor-args', 'youtube:player_client=ios,android,mweb',
-        ]
+    if meta.get("status") not in ("tunnel", "redirect"):
+        raise RuntimeError(f"Cobalt error: {meta.get('error', meta)}")
 
-        if cookies_path:
-            cmd += ['--cookies', cookies_path]
-        else:
-            browser = 'safari' if platform.system() == 'Darwin' else 'chrome'
-            cmd += ['--cookies-from-browser', browser]
+    dl_req = urllib.request.Request(meta["url"], headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(dl_req, timeout=300) as resp:
+        audio_bytes = resp.read()
 
-        cmd += ['--concurrent-fragments', '4']
-        cmd.append(url)
-
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            err = result.stderr.strip() or result.stdout.strip()
-            if 'Sign in' in err or 'bot' in err.lower():
-                raise RuntimeError(_YT_COOKIES_HELP)
-            raise RuntimeError(err)
-
-        title = 'Unknown'
-        for fname in os.listdir(tmp):
-            if fname.endswith('.info.json'):
-                with open(os.path.join(tmp, fname)) as fh:
-                    title = json.load(fh).get('title', 'Unknown')
-                break
-
-        with open(os.path.join(tmp, 'audio.mp3'), 'rb') as fh:
-            return fh.read(), title
+    title = os.path.splitext(meta.get("filename", "audio.mp3"))[0]
+    return audio_bytes, title
 
 
 @app.post("/api/youtube")

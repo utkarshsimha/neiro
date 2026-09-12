@@ -1,4 +1,4 @@
-.PHONY: setup sync run web deploy deploy-legacy clean help yt-cookies
+.PHONY: setup sync run web deploy deploy-legacy deploy-cobalt clean help
 
 # Default target
 help:
@@ -38,12 +38,13 @@ deploy: ## Deploy to Modal (GPU), under both the current and legacy app name
 deploy-legacy: ## Redeploy the same code under the old "song-lab" app name, so old shared links keep working
 	uv run modal deploy modal_app.py --name song-lab
 
-# Usage: make yt-cookies FILE=~/.neiro-yt-cookies.txt
-FILE ?= $(HOME)/.neiro-yt-cookies.txt
-
-yt-cookies: ## Push a freshly-exported cookies.txt to the Modal yt-cookies secret
-	@test -s "$(FILE)" || { echo "No cookies file at $(FILE) — export one first (see app.py's _YT_COOKIES_HELP)"; exit 1; }
-	uv run modal secret create yt-cookies YT_COOKIES_CONTENT="$$(cat $(FILE))" --force
+deploy-cobalt: ## Deploy the self-hosted Cobalt YouTube-extraction service (see cobalt_app.py)
+	uv run modal secret create cobalt \
+		COBALT_URL="$$(uv run python3 -c 'import cobalt_app; print(cobalt_app.COBALT_URL)')" \
+		COBALT_API_KEY="$$(uv run python3 -c 'import uuid; print(uuid.uuid4())')" \
+		--force
+	uv run modal deploy cobalt_app.py
+	@echo "Copy the COBALT_URL / COBALT_API_KEY above into .env for local dev (make web)."
 
 clean: ## Remove .venv, __pycache__, output/
 	rm -rf .venv __pycache__ output/ out/

@@ -41,19 +41,8 @@ gpu_image = (
 # ── Web image — FastAPI only ───────────────────────────────────────────────
 web_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("ffmpeg", "curl", "gnupg")
-    .run_commands(
-        # yt-dlp's EJS n-challenge solver needs a Node version it still supports;
-        # yt-dlp marks older LTS lines "unsupported" and skips JS-challenge solving
-        # entirely (silently degrading to LOGIN_REQUIRED errors even with cookies).
-        "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
-        "apt-get install -y nodejs",
-    )
-    # yt-dlp pinned (not left open-ended): Modal caches this layer by command text, so an
-    # unpinned install silently keeps serving whatever version was resolved at first build.
-    # YouTube's extractor requirements shift often enough that a stale yt-dlp starts failing
-    # with LOGIN_REQUIRED/403 even with valid cookies. Bump this pin to force a rebuild.
-    .pip_install("fastapi[standard]", "python-multipart", "boto3", "yt-dlp[default]==2026.8.19")
+    .apt_install("ffmpeg")
+    .pip_install("fastapi[standard]", "python-multipart", "boto3")
     .add_local_dir("static", remote_path="/app/static")
 )
 
@@ -159,7 +148,7 @@ def separate(audio_bytes: bytes, options_dict: dict):
     image=web_image,
     timeout=3600,
     scaledown_window=300,
-    secrets=[modal.Secret.from_name("cloudflare-r2"), modal.Secret.from_name("yt-cookies")],
+    secrets=[modal.Secret.from_name("cloudflare-r2"), modal.Secret.from_name("cobalt")],
 )
 @modal.asgi_app()
 def fastapi_app():
@@ -343,56 +332,46 @@ def fastapi_app():
         return bool(_YT_RE.match(url.strip()))
 
     def _download_yt(url: str) -> tuple[bytes, str]:
-        import json, subprocess as _sp, sys, tempfile as _tf
+        """Extract audio via a self-hosted Cobalt instance (see cobalt_app.py)."""
+        import json
+        import urllib.error
+        import urllib.request
 
-        _cookies_content = os.environ.get("YT_COOKIES_CONTENT", "").strip()
-        _cookies_tmp = None
-        if _cookies_content:
-            _cfd, _cookies_tmp = _tf.mkstemp(suffix='.txt', prefix='yt-cookies-')
-            try:
-                os.write(_cfd, _cookies_content.encode())
-            finally:
-                os.close(_cfd)
+        cobalt_url = os.environ.get("COBALT_URL", "").rstrip("/")
+        if not cobalt_url:
+            raise RuntimeError("COBALT_URL is not configured (see the 'cobalt' Modal secret).")
 
+        req = urllib.request.Request(
+            cobalt_url + "/",
+            data=json.dumps({
+                "url": url,
+                "downloadMode": "audio",
+                "audioFormat": "mp3",
+                "audioBitrate": "320",
+                "filenameStyle": "pretty",
+            }).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Api-Key {os.environ.get('COBALT_API_KEY', '')}",
+            },
+            method="POST",
+        )
         try:
-            with tempfile.TemporaryDirectory() as tmp:
-                outtmpl = os.path.join(tmp, 'audio.%(ext)s')
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                meta = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"Cobalt request failed: {e.read().decode(errors='replace')}")
 
-                cmd = [
-                    sys.executable, '-m', 'yt_dlp',
-                    '--format', 'bestaudio/bestaudio*/best',
-                    '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '2',
-                    '--output', outtmpl,
-                    '--write-info-json',
-                    '--no-playlist',
-                    '--quiet', '--no-warnings',
-                    '--js-runtimes', 'node',
-                    '--extractor-args', 'youtube:player_client=ios,android,mweb',
-                ]
-                if _cookies_tmp:
-                    cmd += ['--cookies', _cookies_tmp]
-                cmd += ['--concurrent-fragments', '4']
-                cmd.append(url)
+        if meta.get("status") not in ("tunnel", "redirect"):
+            raise RuntimeError(f"Cobalt error: {meta.get('error', meta)}")
 
-                result = _sp.run(cmd, capture_output=True, text=True)
-                if result.returncode != 0:
-                    raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+        dl_req = urllib.request.Request(meta["url"], headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(dl_req, timeout=300) as resp:
+            audio_bytes = resp.read()
 
-                title = 'Unknown'
-                for fname in os.listdir(tmp):
-                    if fname.endswith('.info.json'):
-                        with open(os.path.join(tmp, fname)) as fh:
-                            title = json.load(fh).get('title', 'Unknown')
-                        break
-
-                with open(os.path.join(tmp, 'audio.mp3'), 'rb') as fh:
-                    return fh.read(), title
-        finally:
-            if _cookies_tmp:
-                try:
-                    os.unlink(_cookies_tmp)
-                except OSError:
-                    pass
+        title = os.path.splitext(meta.get("filename", "audio.mp3"))[0]
+        return audio_bytes, title
 
     @web.post("/api/youtube")
     async def api_youtube(request: Request):
