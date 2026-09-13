@@ -157,6 +157,17 @@ def _download_yt(url: str) -> tuple[bytes, str]:
     with urllib.request.urlopen(dl_req, timeout=300) as resp:
         audio_bytes = resp.read()
 
+    if not audio_bytes:
+        # Cobalt sometimes returns an HTTP 200 with an empty body when YouTube
+        # silently rejects the upstream fetch (e.g. a video that now requires
+        # a proof-of-origin token) — surface this instead of letting an empty
+        # file reach the separation pipeline.
+        raise RuntimeError(
+            "Cobalt returned an empty file for this video — YouTube likely "
+            "rejected the download (this can happen for videos that need a "
+            "proof-of-origin token). Try a different video or link."
+        )
+
     title = os.path.splitext(meta.get("filename", "audio.mp3"))[0]
     return audio_bytes, title
 

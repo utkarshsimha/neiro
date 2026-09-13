@@ -72,6 +72,11 @@ directly in a background thread.
    bot checks) over HTTP, and strips "(Official Video)"-style junk from titles. Both `app.py`
    and `modal_app.py` need `COBALT_URL` / `COBALT_API_KEY` set (`.env` locally, the `cobalt`
    Modal secret in production — `make deploy-cobalt` deploys Cobalt and creates that secret).
+   YouTube sometimes requires a proof-of-origin token Cobalt can't obtain from Modal's IP
+   range, in which case it silently returns an empty file instead of erroring — `_download_yt`
+   in both files treats an empty download as a hard error rather than passing it to the
+   separation pipeline (see the note in `cobalt_app.py` on why there's no token-provider
+   sidecar: it hits the same IP-blocking problem it's meant to solve).
 
 ### Separation pipeline (`inference.py`)
 

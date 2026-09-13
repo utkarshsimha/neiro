@@ -16,6 +16,16 @@ because that image is Alpine/musl-based and Modal's runtime needs a
 glibc-linked container to attach a Python interpreter to. Pinned to the
 commit matching the ghcr.io/imputnet/cobalt:11 (v11.7.1) release.
 
+Some videos need a YouTube proof-of-origin token that Cobalt can't obtain
+without a browser-based session-generator sidecar; we tried self-hosting
+imputnet/yt-session-generator here too, but it makes the same request from
+the same Modal IP range and just times out (`update failed: timeout waiting
+for outgoing API request`), so it's not wired up. `_download_yt` in
+app.py/modal_app.py treats an empty download as a hard error instead of
+silently passing it to the separation pipeline — some videos will still
+fail to import, with a clear message, until there's a non-Modal-IP way to
+get a token.
+
 The shared auth key (`COBALT_API_KEY`, sent as `Authorization: Api-Key <key>`)
 lives only in the `cobalt` Modal secret, never in source — run
 `make deploy-cobalt` (creates/rotates that secret, then deploys this file).
