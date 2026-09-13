@@ -2294,14 +2294,42 @@ function fmt(s) {
 }
 
 // ── Save to library (results-card / karaoke-player) ─────────────────────────
-async function postShare(filesB64, mode, title, artist) {
-  const resp = await fetch('/api/share', {
+// Stems (often 100MB+ of lossless FLAC) upload straight to R2 via presigned
+// PUT URLs instead of riding along in one big JSON POST through this server
+// — that used to run into Modal web endpoints' 150s request timeout on
+// slower connections, leaving the "Saving…" button stuck with no feedback.
+async function postShare(filesB64, mode, title, artist, onProgress) {
+  const filenames = Object.keys(filesB64);
+  const initResp = await fetch('/api/share/init', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ files: filesB64, mode, title, artist }),
+    body: JSON.stringify({ filenames }),
   });
-  if (!resp.ok) throw new Error(await resp.text());
-  return resp.json(); // { uuid }
+  if (!initResp.ok) throw new Error(await initResp.text());
+  const { job_id, uploads } = await initResp.json();
+
+  let done = 0;
+  onProgress?.(done, filenames.length);
+  for (const fname of filenames) {
+    const bytes = Uint8Array.from(atob(filesB64[fname]), c => c.charCodeAt(0));
+    const contentType = fname.endsWith('.mp3') ? 'audio/mpeg' : 'application/octet-stream';
+    const putResp = await fetch(uploads[fname], {
+      method: 'PUT',
+      headers: { 'Content-Type': contentType },
+      body: bytes,
+    });
+    if (!putResp.ok) throw new Error(`Upload failed for ${fname} (${putResp.status})`);
+    done++;
+    onProgress?.(done, filenames.length);
+  }
+
+  const finalizeResp = await fetch('/api/share/finalize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ job_id, files: filenames, mode, title, artist }),
+  });
+  if (!finalizeResp.ok) throw new Error(await finalizeResp.text());
+  return finalizeResp.json(); // { uuid }
 }
 
 function openSaveModal(pending, heading, defaultArtist, defaultTitle) {
@@ -2352,14 +2380,16 @@ modalSaveBtn.addEventListener('click', async () => {
       if (!resp.ok) throw new Error(await resp.text());
     } else if (pendingSave.mode === 'practice') {
       if (!currentFilesB64) throw new Error('Nothing to save — separate a track first.');
-      const { uuid } = await postShare(currentFilesB64, 'practice', title, artist);
+      const onProgress = (done, total) => { modalSaveBtn.textContent = `Saving… (${done}/${total})`; };
+      const { uuid } = await postShare(currentFilesB64, 'practice', title, artist, onProgress);
       shareUrlEl.value = `${location.origin}/result/${uuid}`;
       shareRow.classList.remove('hidden');
       shareBtn.classList.add('hidden');
       resultsHint.classList.add('hidden');
     } else {
       if (!currentKaraokeFilesB64) throw new Error('Nothing to save — separate a track first.');
-      await postShare(currentKaraokeFilesB64, 'karaoke', title, artist);
+      const onProgress = (done, total) => { modalSaveBtn.textContent = `Saving… (${done}/${total})`; };
+      await postShare(currentKaraokeFilesB64, 'karaoke', title, artist, onProgress);
       kpSaveBtn.textContent = '✓ Saved';
       kpSaveBtn.disabled = true;
     }

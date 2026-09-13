@@ -38,7 +38,7 @@ async def _configure_r2_cors():
     try:
         _get_r2().put_bucket_cors(
             Bucket=os.environ["R2_BUCKET_NAME"],
-            CORSConfiguration={"CORSRules": [{"AllowedHeaders": ["*"], "AllowedMethods": ["GET", "HEAD"],
+            CORSConfiguration={"CORSRules": [{"AllowedHeaders": ["*"], "AllowedMethods": ["GET", "HEAD", "PUT"],
                                                "AllowedOrigins": ["*"], "MaxAgeSeconds": 86400}]},
         )
     except Exception:
@@ -55,13 +55,35 @@ async def share_page(job_id: str):
     return FileResponse("static/index.html")
 
 
-@app.post("/api/share")
-async def api_share(request: Request):
+@app.post("/api/share/init")
+async def api_share_init(request: Request):
+    """Return presigned PUT URLs so the browser can upload stems straight to R2.
+
+    Routing the (often 100MB+, lossless-FLAC) stems through this server as a
+    single JSON body used to hit Modal's 150s web-endpoint request timeout on
+    slower connections, leaving the "Saving…" button stuck. Direct-to-R2
+    upload has no such limit.
+    """
+    data = await request.json()
+    filenames = data.get("filenames") or []
+    if not filenames:
+        raise HTTPException(400, "No filenames provided")
+    try:
+        loop = asyncio.get_event_loop()
+        job_id, urls = await loop.run_in_executor(None, _presign_puts, filenames)
+        return {"job_id": job_id, "uploads": urls}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/share/finalize")
+async def api_share_finalize(request: Request):
     data = await request.json()
     try:
         loop = asyncio.get_event_loop()
         job_id = await loop.run_in_executor(
-            None, _upload_to_r2, data["files"], data.get("mode"), data.get("title"), data.get("artist"),
+            None, _write_manifest, data["job_id"], data["files"],
+            data.get("mode"), data.get("title"), data.get("artist"),
         )
         return {"uuid": job_id}
     except Exception as e:
@@ -245,20 +267,39 @@ def _get_r2():
     )
 
 
-def _upload_to_r2(files: dict, mode: str | None = None, title: str | None = None, artist: str | None = None) -> str:
-    """Upload base64 files to R2, return UUID."""
+def _content_type_for(fname: str) -> str:
+    return "audio/mpeg" if fname.endswith(".mp3") else "application/octet-stream"
+
+
+def _presign_puts(filenames: list[str]) -> tuple[str, dict[str, str]]:
+    """Presign one PUT URL per stem so the browser can upload directly to R2."""
     r2 = _get_r2()
     bucket = os.environ["R2_BUCKET_NAME"]
     job_id = str(uuid.uuid4())
-    for fname, b64 in files.items():
-        r2.put_object(
-            Bucket=bucket,
-            Key=f"results/{job_id}/{fname}",
-            Body=base64.b64decode(b64),
-            ContentType="audio/mpeg" if fname.endswith(".mp3") else "application/octet-stream",
+    urls = {
+        fname: r2.generate_presigned_url(
+            "put_object",
+            Params={
+                "Bucket": bucket,
+                "Key": f"results/{job_id}/{fname}",
+                "ContentType": _content_type_for(fname),
+            },
+            ExpiresIn=1800,
         )
+        for fname in filenames
+    }
+    return job_id, urls
+
+
+def _write_manifest(
+    job_id: str, files: list[str],
+    mode: str | None = None, title: str | None = None, artist: str | None = None,
+) -> str:
+    """Write manifest.json for stems the browser already PUT directly to R2."""
+    r2 = _get_r2()
+    bucket = os.environ["R2_BUCKET_NAME"]
     manifest = json.dumps({
-        "files": list(files.keys()),
+        "files": files,
         "mode": mode if mode in ("karaoke", "practice") else "practice",
         "title": title or None,
         "artist": artist or None,

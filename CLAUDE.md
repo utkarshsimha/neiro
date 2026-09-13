@@ -63,10 +63,15 @@ directly in a background thread.
    base64'd, then re-encoded to MP3 for browser playback.
 4. Model checkpoints live on a Modal `Volume` (`mvsep-models`) so they persist across container
    cold starts; `model_volume.commit()` is called after each run.
-5. `POST /api/share` uploads the finished stems to Cloudflare R2 under `results/{uuid}/`, with a
-   `manifest.json` listing filenames; `GET /api/result/{job_id}` returns presigned GET URLs
-   (24h expiry). R2 is optional — configured via `.env` locally (`cp .env.example .env`) or a
-   `cloudflare-r2` Modal secret in production; share links silently unavailable if unset.
+5. Saving to the library uploads the finished stems to Cloudflare R2 under `results/{uuid}/`,
+   with a `manifest.json` listing filenames — but not through this server: `POST /api/share/init`
+   returns presigned PUT URLs per stem, the browser PUTs each stem straight to R2, then
+   `POST /api/share/finalize` writes the manifest. Stems are often 100MB+ (lossless FLAC,
+   base64'd) and routing them through one JSON POST here used to hit Modal web endpoints' 150s
+   request timeout on slower connections; direct-to-R2 upload has no such limit.
+   `GET /api/result/{job_id}` returns presigned GET URLs (24h expiry). R2 is optional —
+   configured via `.env` locally (`cp .env.example .env`) or a `cloudflare-r2` Modal secret in
+   production; share/library features silently unavailable if unset.
 6. YouTube ingestion (`/api/youtube`) calls a self-hosted Cobalt instance (`cobalt_app.py`, a
    separate Modal app — see there for why: yt-dlp run directly from Modal's IPs kept tripping
    bot checks) over HTTP, and strips "(Official Video)"-style junk from titles. Both `app.py`
