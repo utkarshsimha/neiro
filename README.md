@@ -196,6 +196,13 @@ Pre-trained weights are downloaded automatically to `models/` on first use. Key 
 
 ---
 
+## Contributing
+
+Want to contribute, or deploy your own instance to Modal (including the optional
+share/library and YouTube-import features)? See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
 ## Future work
 
 ### Piano transcription
