@@ -417,13 +417,17 @@ def fastapi_app():
         filename = safe + '.mp3'
         return {"audio": base64.b64encode(audio_bytes).decode(), "filename": filename, "title": title}
 
+    # Always revalidate — this is a single-file SPA, so a stale cached copy after a
+    # deploy silently keeps calling removed/changed API routes.
+    _index_headers = {"Cache-Control": "no-cache"}
+
     @web.get("/")
     async def index():
-        return FileResponse("/app/static/index.html")
+        return FileResponse("/app/static/index.html", headers=_index_headers)
 
     @web.get("/result/{job_id}")
     async def share_page(job_id: str):
-        return FileResponse("/app/static/index.html")
+        return FileResponse("/app/static/index.html", headers=_index_headers)
 
     @web.post("/api/share/init")
     async def api_share_init(request: Request):

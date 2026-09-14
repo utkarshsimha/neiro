@@ -45,14 +45,18 @@ async def _configure_r2_cors():
         pass
 
 
+_INDEX_HEADERS = {"Cache-Control": "no-cache"}  # always revalidate — this is a single-file SPA,
+# so a stale cached copy after a deploy silently keeps calling removed/changed API routes
+
+
 @app.get("/")
 async def index():
-    return FileResponse("static/index.html")
+    return FileResponse("static/index.html", headers=_INDEX_HEADERS)
 
 
 @app.get("/result/{job_id}")
 async def share_page(job_id: str):
-    return FileResponse("static/index.html")
+    return FileResponse("static/index.html", headers=_INDEX_HEADERS)
 
 
 @app.post("/api/share/init")
