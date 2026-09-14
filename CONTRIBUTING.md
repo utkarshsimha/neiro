@@ -67,6 +67,15 @@ You don't need this for most contributions (UI tweaks, pipeline changes, docs) â
 if you're testing something that requires the GPU path, the share/library feature, or
 YouTube import.
 
+The default path below is your own free Modal account â€” Modal's free tier includes
+$30/month in compute credits, enough for a lot of testing. If you'd rather not set
+that up, or want to test against the exact same deployment/secrets the maintainer
+runs in production, **message [@utkarshsimha](https://github.com/utkarshsimha) to be
+added as a member of his Modal workspace** instead of following the steps below.
+Note that as a workspace member you'd be deploying into the same live `neiro` app and
+sharing its billing and secrets, so this is meant for people actively collaborating,
+not a default ask for every contribution.
+
 ### 1. Modal account
 
 1. [Create a Modal account](https://modal.com/signup).
