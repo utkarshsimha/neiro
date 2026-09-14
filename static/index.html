@@ -606,18 +606,16 @@
     .pp-ctrl-btn:hover { border-color: var(--green); color: var(--green); }
     .pp-ctrl-btn:disabled { opacity: .4; cursor: not-allowed; }
     .pp-skip-back-btn, .pp-skip-fwd-btn { width: auto; padding: 0 .65rem; font-size: .74rem; font-weight: 600; }
-    .pp-speed-select {
-      -webkit-appearance: none; -moz-appearance: none; appearance: none;
-      height: 34px; border-radius: 8px; padding: 0 1.55rem 0 .65rem;
-      border: 1px solid var(--border); background-color: transparent;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23a89984' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-      background-repeat: no-repeat; background-position: right .55rem center;
-      color: var(--muted); font-size: .74rem; font-weight: 600; cursor: pointer;
-      flex-shrink: 0; outline: none; transition: border-color .15s, color .15s;
+    .pp-speed-wrap {
+      display: flex; align-items: center; gap: .45rem; flex-shrink: 0;
+      padding: 0 .3rem;
     }
-    .pp-speed-select:hover, .pp-speed-select:focus-visible { border-color: var(--green); color: var(--green); }
-    .pp-speed-select:disabled { opacity: .4; cursor: not-allowed; }
-    .pp-speed-select option { background: var(--surface2); color: var(--text); }
+    .pp-speed-slider { width: 90px; accent-color: var(--green); cursor: pointer; }
+    .pp-speed-slider:disabled { opacity: .4; cursor: not-allowed; }
+    .pp-speed-label {
+      font-size: .74rem; font-weight: 600; color: var(--muted);
+      min-width: 40px; text-align: right; font-variant-numeric: tabular-nums;
+    }
     .pp-play-btn {
       width: 44px; height: 44px; border-radius: 50%;
       border: 2px solid var(--green); background: transparent;
@@ -1982,14 +1980,10 @@ function buildPracticeCard(stemFilesMap) {
       <button class="pp-ctrl-btn pp-skip-back-btn" title="Back 5 seconds" disabled>⏪ 5</button>
       <button class="pp-play-btn" aria-label="Play" disabled>▶</button>
       <button class="pp-ctrl-btn pp-skip-fwd-btn" title="Forward 5 seconds" disabled>5 ⏩</button>
-      <select class="pp-speed-select" title="Playback speed" disabled>
-        <option value="1">1.0x</option>
-        <option value="1.1">1.1x</option>
-        <option value="1.25">1.25x</option>
-        <option value="1.5">1.5x</option>
-        <option value="1.75">1.75x</option>
-        <option value="2">2.0x</option>
-      </select>
+      <div class="pp-speed-wrap" title="Playback speed">
+        <input type="range" class="pp-speed-slider" min="0.8" max="1.2" step="0.01" value="1" disabled>
+        <span class="pp-speed-label">1.00x</span>
+      </div>
       <div class="pp-seek-wrap" style="pointer-events:none">
         <div class="pp-seek-track">
           <div class="pp-seek-fill"></div>
@@ -2014,7 +2008,8 @@ function buildPracticeCard(stemFilesMap) {
   const restartBtn  = card.querySelector('.pp-restart-btn');
   const skipBackBtn = card.querySelector('.pp-skip-back-btn');
   const skipFwdBtn  = card.querySelector('.pp-skip-fwd-btn');
-  const speedSelect = card.querySelector('.pp-speed-select');
+  const speedSlider = card.querySelector('.pp-speed-slider');
+  const speedLabel  = card.querySelector('.pp-speed-label');
   const seekWrap    = card.querySelector('.pp-seek-wrap');
   const seekFill    = card.querySelector('.pp-seek-fill');
   const seekThumb   = card.querySelector('.pp-seek-thumb');
@@ -2195,19 +2190,20 @@ function buildPracticeCard(stemFilesMap) {
   skipBackBtn.addEventListener('click', () => doSeek(getPosition() - 5));
   skipFwdBtn.addEventListener('click', () => doSeek(getPosition() + 5));
 
-  speedSelect.addEventListener('change', () => {
-    const wasPlaying = ppPlaying;
-    // Capture position under the OLD rate before switching, since getPosition()
-    // scales elapsed real time by playbackRate.
-    if (wasPlaying) {
+  function setRate(rate) {
+    if (ppPlaying) {
+      // Checkpoint position under the OLD rate first — getPosition() assumes a
+      // constant rate since the last checkpoint, so this keeps it accurate
+      // across the change instead of restarting the sources (which would pop).
       startOffset = getPosition();
-      playGen++;
-      stems.forEach(stem => { try { sources[stem]?.stop(); } catch(_) {} });
-      ppPlaying = false;
+      playCtxTime = ctx.currentTime;
+      stems.forEach(stem => { if (sources[stem]) sources[stem].playbackRate.value = rate; });
     }
-    playbackRate = parseFloat(speedSelect.value) || 1;
-    if (wasPlaying) doPlay();
-  });
+    playbackRate = rate;
+    speedLabel.textContent = rate.toFixed(2) + 'x';
+  }
+
+  speedSlider.addEventListener('input', () => setRate(parseFloat(speedSlider.value) || 1));
 
   card.querySelectorAll('.pp-solo-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -2303,7 +2299,7 @@ function buildPracticeCard(stemFilesMap) {
       restartBtn.disabled = false;
       skipBackBtn.disabled = false;
       skipFwdBtn.disabled = false;
-      speedSelect.disabled = false;
+      speedSlider.disabled = false;
       gbBtn.disabled = false;
       seekWrap.style.pointerEvents = '';
       startTicker();
