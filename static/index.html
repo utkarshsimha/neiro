@@ -857,6 +857,17 @@
     .library-header h2 {
       font-size: 1.2rem; font-weight: 700; letter-spacing: -.01em; color: var(--text);
     }
+    .library-header-right { display: flex; align-items: center; gap: .7rem; }
+    .library-search {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: .3rem .6rem;
+      font-size: .8rem;
+      background: var(--surface2);
+      color: var(--text);
+      width: 180px;
+    }
+    .library-search:focus { outline: none; border-color: var(--green); }
     .library-count { font-size: .78rem; color: var(--muted); }
     .library-empty {
       text-align: center; color: var(--muted); font-size: .85rem;
@@ -916,6 +927,40 @@
     }
     .lib-rename-btn:hover { color: var(--accent-mode, var(--green)); }
     .lib-delete-btn:hover { color: var(--red); }
+
+    /* Grouped ("N versions") library card */
+    .lib-version-chip {
+      display: inline-block;
+      font-size: .68rem; color: var(--muted);
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 99px; padding: .15rem .55rem;
+      margin-left: .4rem; vertical-align: middle;
+    }
+    .lib-versions { margin-top: .6rem; }
+    .lib-versions summary {
+      cursor: pointer; font-size: .72rem; color: var(--muted);
+      list-style: none; user-select: none;
+      display: inline-flex; align-items: center; gap: .35rem;
+      transition: color .15s;
+    }
+    .lib-versions summary::-webkit-details-marker { display: none; }
+    .lib-versions summary::before { content: '▸'; font-size: .65rem; }
+    .lib-versions[open] summary::before { content: '▾'; }
+    .lib-versions summary:hover { color: var(--text); }
+    .lib-version-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: .45rem .1rem; border-top: 1px solid var(--border);
+      gap: .5rem;
+    }
+    .lib-version-row:first-of-type { margin-top: .5rem; }
+    .lib-version-row-main { display: flex; flex-direction: column; gap: .1rem; overflow: hidden; }
+    .lib-version-label {
+      font-size: .78rem; color: var(--text); cursor: pointer;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .lib-version-label:hover { color: var(--accent-mode, var(--green)); }
+    .lib-version-date { font-size: .66rem; color: var(--muted); }
+    .lib-version-actions { display: flex; gap: .3rem; flex-shrink: 0; }
 
     /* ── Save / rename modal ────────────────────────────────────────────── */
     .modal-overlay {
@@ -990,7 +1035,11 @@
     <div class="library-section">
       <div class="library-header">
         <h2>Your library</h2>
-        <span class="library-count" id="library-count"></span>
+        <div class="library-header-right">
+          <input type="search" id="library-search" class="library-search"
+                 placeholder="Search title or artist…" aria-label="Search library">
+          <span class="library-count" id="library-count"></span>
+        </div>
       </div>
       <div id="library-grid" class="library-grid"></div>
       <div id="library-empty" class="library-empty hidden">Nothing saved yet — process a track and save it to see it here.</div>
@@ -1372,6 +1421,8 @@ const backToHomeBtn      = document.getElementById('back-to-home');
 const libraryGrid        = document.getElementById('library-grid');
 const libraryCountEl     = document.getElementById('library-count');
 const libraryEmptyEl     = document.getElementById('library-empty');
+const librarySearchEl    = document.getElementById('library-search');
+let libraryItemsCache = [];   // last-fetched raw items, so search re-filters without refetching
 const saveModal          = document.getElementById('save-modal');
 const modalHeading       = document.getElementById('modal-heading');
 const modalArtistEl      = document.getElementById('modal-artist');
@@ -2477,13 +2528,7 @@ function buildLibraryCard(item) {
     try {
       const resp = await fetch(`/api/library/${item.job_id}`, { method: 'DELETE' });
       if (!resp.ok) throw new Error(await resp.text());
-      card.remove();
-      if (!libraryGrid.children.length) {
-        libraryGrid.classList.add('hidden');
-        libraryEmptyEl.classList.remove('hidden');
-      }
-      const remaining = libraryGrid.children.length;
-      libraryCountEl.textContent = remaining ? `${remaining} saved` : '';
+      loadLibrary();
     } catch (err) {
       btn.disabled = false;
       btn.textContent = '🗑 Delete';
@@ -2491,6 +2536,96 @@ function buildLibraryCard(item) {
     }
   });
   card.addEventListener('click', () => openResult(item.job_id, item));
+  return card;
+}
+
+// Group versions of the same song together — e.g. "Eyes of The World" and
+// "Eyes of The World - GG version" both key to the same group, cutting the
+// title at the first version-introducing delimiter. Deliberately simple (no
+// fuzzy matching): predictable enough for the user to reason about, and a
+// wrong grouping in a personal library this size is as easy to notice/fix
+// (by renaming) as a missed one would be.
+function normalizeTitleKey(item) {
+  if (!item.title) return `__untitled_${item.job_id}`;
+  const base = item.title.split(/\s+[-–—([]/)[0].trim().toLowerCase();
+  return `${(item.artist || '').trim().toLowerCase()}::${base}`;
+}
+
+function groupLibraryItems(items) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = normalizeTitleKey(item);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  return [...groups.values()]
+    .map(v => v.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)))
+    .sort((a, b) => new Date(b[0].created_at) - new Date(a[0].created_at));
+}
+
+function buildLibraryGroupCard(versions) {
+  const primary  = versions[0]; // most recent — badge/date/default-click target
+  const shortest = versions.reduce((a, b) => (b.title || '').length < (a.title || '').length ? b : a);
+  const card = document.createElement('div');
+  card.className = `lib-card lib-card-group mode-${primary.mode}`;
+  const badge = primary.mode === 'karaoke' ? '🎤 Karaoke' : '🎸 Practice';
+  const titleText = shortest.title ? escapeHtml(shortest.title) : 'Untitled';
+  const titleHtml = `<div class="lib-title${shortest.title ? '' : ' untitled'}">${titleText}<span class="lib-version-chip">${versions.length} versions</span></div>`;
+  card.innerHTML = `
+    <span class="lib-badge">${badge}</span>
+    ${titleHtml}
+    <div class="lib-artist">${primary.artist ? escapeHtml(primary.artist) : '&nbsp;'}</div>
+    <div class="lib-meta">
+      <span class="lib-date">${fmtDate(primary.created_at)}</span>
+    </div>
+    <details class="lib-versions">
+      <summary>Show versions</summary>
+      <div class="lib-version-list"></div>
+    </details>
+  `;
+  const listEl = card.querySelector('.lib-version-list');
+  versions.forEach(v => {
+    const row = document.createElement('div');
+    row.className = 'lib-version-row';
+    row.innerHTML = `
+      <div class="lib-version-row-main">
+        <span class="lib-version-label">${v.title ? escapeHtml(v.title) : '<em>Untitled</em>'}</span>
+        <span class="lib-version-date">${fmtDate(v.created_at)}</span>
+      </div>
+      <div class="lib-version-actions">
+        <button type="button" class="lib-rename-btn" title="Rename">✎</button>
+        <button type="button" class="lib-delete-btn" title="Delete">🗑</button>
+      </div>
+    `;
+    row.querySelector('.lib-version-label').addEventListener('click', e => {
+      e.stopPropagation();
+      openResult(v.job_id, v);
+    });
+    row.querySelector('.lib-rename-btn').addEventListener('click', e => {
+      e.stopPropagation();
+      openSaveModal({ kind: 'rename', jobId: v.job_id }, 'Rename', v.artist, v.title);
+    });
+    row.querySelector('.lib-delete-btn').addEventListener('click', async e => {
+      e.stopPropagation();
+      const label = v.title ? `"${v.title}"` : 'this untitled track';
+      if (!confirm(`Delete ${label} from your library? This can't be undone.`)) return;
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        const resp = await fetch(`/api/library/${v.job_id}`, { method: 'DELETE' });
+        if (!resp.ok) throw new Error(await resp.text());
+        loadLibrary(); // full reload — recomputes groups, e.g. collapses back to a singleton card
+      } catch (err) {
+        btn.disabled = false;
+        alert('Delete failed: ' + err.message);
+      }
+    });
+    listEl.appendChild(row);
+  });
+  card.addEventListener('click', e => {
+    if (e.target.closest('.lib-versions')) return;
+    openResult(primary.job_id, primary);
+  });
   return card;
 }
 
@@ -2505,11 +2640,8 @@ async function loadLibrary() {
     const resp = await fetch('/api/library');
     if (!resp.ok) throw new Error(await resp.text());
     const { items } = await resp.json();
-    libraryGrid.innerHTML = '';
-    items.forEach(item => libraryGrid.appendChild(buildLibraryCard(item)));
-    libraryCountEl.textContent = items.length ? `${items.length} saved` : '';
-    libraryEmptyEl.classList.toggle('hidden', items.length > 0);
-    libraryGrid.classList.toggle('hidden', items.length === 0);
+    libraryItemsCache = items;
+    renderLibrary();
   } catch (e) {
     console.warn('Failed to load library:', e);
     libraryEmptyEl.textContent = 'Could not load your library.';
@@ -2517,6 +2649,34 @@ async function loadLibrary() {
     libraryGrid.classList.add('hidden');
   }
 }
+
+function renderLibrary() {
+  const query = librarySearchEl.value.trim().toLowerCase();
+  const allGroups = groupLibraryItems(libraryItemsCache);
+  const groups = query
+    ? allGroups.filter(versions => versions.some(v =>
+        (v.title || '').toLowerCase().includes(query) ||
+        (v.artist || '').toLowerCase().includes(query)))
+    : allGroups;
+
+  libraryGrid.innerHTML = '';
+  groups.forEach(versions => {
+    libraryGrid.appendChild(versions.length > 1 ? buildLibraryGroupCard(versions) : buildLibraryCard(versions[0]));
+  });
+
+  const totalItems = groups.reduce((n, g) => n + g.length, 0);
+  libraryCountEl.textContent = totalItems ? `${totalItems} saved` : '';
+  const isEmpty = totalItems === 0;
+  libraryGrid.classList.toggle('hidden', isEmpty);
+  libraryEmptyEl.classList.toggle('hidden', !isEmpty);
+  if (isEmpty) {
+    libraryEmptyEl.textContent = query
+      ? `No songs match "${librarySearchEl.value.trim()}".`
+      : 'Nothing saved yet — process a track and save it to see it here.';
+  }
+}
+
+librarySearchEl.addEventListener('input', renderLibrary);
 
 // Open a saved job — routes to the practice mixer or the karaoke player
 // depending on its mode. `item` (title/artist/mode) may already be known
