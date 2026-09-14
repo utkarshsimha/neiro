@@ -606,6 +606,15 @@
     .pp-ctrl-btn:hover { border-color: var(--green); color: var(--green); }
     .pp-ctrl-btn:disabled { opacity: .4; cursor: not-allowed; }
     .pp-skip-back-btn, .pp-skip-fwd-btn { width: auto; padding: 0 .65rem; font-size: .74rem; font-weight: 600; }
+    .pp-speed-select {
+      height: 34px; border-radius: 8px; padding: 0 .4rem;
+      border: 1px solid var(--border); background: transparent;
+      color: var(--muted); font-size: .74rem; font-weight: 600; cursor: pointer;
+      flex-shrink: 0; transition: border-color .15s, color .15s;
+    }
+    .pp-speed-select:hover { border-color: var(--green); color: var(--green); }
+    .pp-speed-select:disabled { opacity: .4; cursor: not-allowed; }
+    .pp-speed-select option { background: var(--surface2); color: var(--text); }
     .pp-play-btn {
       width: 44px; height: 44px; border-radius: 50%;
       border: 2px solid var(--green); background: transparent;
@@ -1970,6 +1979,14 @@ function buildPracticeCard(stemFilesMap) {
       <button class="pp-ctrl-btn pp-skip-back-btn" title="Back 5 seconds" disabled>⏪ 5</button>
       <button class="pp-play-btn" aria-label="Play" disabled>▶</button>
       <button class="pp-ctrl-btn pp-skip-fwd-btn" title="Forward 5 seconds" disabled>5 ⏩</button>
+      <select class="pp-speed-select" title="Playback speed" disabled>
+        <option value="1">1.0x</option>
+        <option value="1.1">1.1x</option>
+        <option value="1.25">1.25x</option>
+        <option value="1.5">1.5x</option>
+        <option value="1.75">1.75x</option>
+        <option value="2">2.0x</option>
+      </select>
       <div class="pp-seek-wrap" style="pointer-events:none">
         <div class="pp-seek-track">
           <div class="pp-seek-fill"></div>
@@ -1994,6 +2011,7 @@ function buildPracticeCard(stemFilesMap) {
   const restartBtn  = card.querySelector('.pp-restart-btn');
   const skipBackBtn = card.querySelector('.pp-skip-back-btn');
   const skipFwdBtn  = card.querySelector('.pp-skip-fwd-btn');
+  const speedSelect = card.querySelector('.pp-speed-select');
   const seekWrap    = card.querySelector('.pp-seek-wrap');
   const seekFill    = card.querySelector('.pp-seek-fill');
   const seekThumb   = card.querySelector('.pp-seek-thumb');
@@ -2047,6 +2065,7 @@ function buildPracticeCard(stemFilesMap) {
   let playGen = 0;           // incremented on each stop to cancel stale onended
   let duration = 0;
   let rafId = null;
+  let playbackRate = 1;      // 1.0–2.0x — applied to all stems' BufferSourceNodes in lockstep
 
   function computedVol(stem) {
     if (muteSet.has(stem)) return 0;
@@ -2065,7 +2084,7 @@ function buildPracticeCard(stemFilesMap) {
 
   function getPosition() {
     if (!ctx || !ppPlaying) return startOffset;
-    return Math.min(startOffset + (ctx.currentTime - playCtxTime), duration);
+    return Math.min(startOffset + (ctx.currentTime - playCtxTime) * playbackRate, duration);
   }
 
   function doPlay() {
@@ -2082,6 +2101,7 @@ function buildPracticeCard(stemFilesMap) {
     stems.forEach(stem => {
       const src = ctx.createBufferSource();
       src.buffer = buffers[stem];
+      src.playbackRate.value = playbackRate;
       src.connect(gainNodes[stem]);
       src.start(when, off);
       sources[stem] = src;
@@ -2171,6 +2191,20 @@ function buildPracticeCard(stemFilesMap) {
   restartBtn.addEventListener('click', () => doSeek(0));
   skipBackBtn.addEventListener('click', () => doSeek(getPosition() - 5));
   skipFwdBtn.addEventListener('click', () => doSeek(getPosition() + 5));
+
+  speedSelect.addEventListener('change', () => {
+    const wasPlaying = ppPlaying;
+    // Capture position under the OLD rate before switching, since getPosition()
+    // scales elapsed real time by playbackRate.
+    if (wasPlaying) {
+      startOffset = getPosition();
+      playGen++;
+      stems.forEach(stem => { try { sources[stem]?.stop(); } catch(_) {} });
+      ppPlaying = false;
+    }
+    playbackRate = parseFloat(speedSelect.value) || 1;
+    if (wasPlaying) doPlay();
+  });
 
   card.querySelectorAll('.pp-solo-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -2266,6 +2300,7 @@ function buildPracticeCard(stemFilesMap) {
       restartBtn.disabled = false;
       skipBackBtn.disabled = false;
       skipFwdBtn.disabled = false;
+      speedSelect.disabled = false;
       gbBtn.disabled = false;
       seekWrap.style.pointerEvents = '';
       startTicker();
