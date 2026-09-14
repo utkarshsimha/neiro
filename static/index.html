@@ -1349,26 +1349,6 @@ const MODEL_ICONS = {
   piano:   { icon: '🎹', label: 'Piano' },
 };
 
-// Pitch-preserving time-stretch for practice-mode speed control (see buildPracticeCard).
-// Loaded from a CDN via dynamic import — no bundler in this single-file app — with a
-// graceful fallback to plain (pitch-shifting) playbackRate if it fails to load.
-const SOUNDTOUCH_BASE = 'https://cdn.jsdelivr.net/npm/@soundtouchjs/audio-worklet@2.1.1/.dist';
-let soundTouchNodeClassPromise = null;
-async function loadSoundTouchNode(ctx) {
-  if (!ctx.audioWorklet) return null;
-  try {
-    if (!soundTouchNodeClassPromise) {
-      soundTouchNodeClassPromise = import(/* webpackIgnore: true */ `${SOUNDTOUCH_BASE}/index.js`).then(m => m.SoundTouchNode);
-    }
-    const SoundTouchNode = await soundTouchNodeClassPromise;
-    await SoundTouchNode.register(ctx, `${SOUNDTOUCH_BASE}/soundtouch-processor.js`);
-    return SoundTouchNode;
-  } catch (e) {
-    console.warn('Pitch-preserving speed unavailable, falling back to plain rate change:', e);
-    return null;
-  }
-}
-
 // ── DOM refs ───────────────────────────────────────────────────────────────
 const dropZone    = document.getElementById('drop-zone');
 const fileInput   = document.getElementById('file-input');
@@ -2126,7 +2106,6 @@ function buildPracticeCard(stemFilesMap) {
   // Web Audio state (populated after async load)
   let ctx = null;
   let gainNodes = null;
-  let stretchNodes = null;   // per-stem SoundTouchNode (pitch-preserving time-stretch), null if unavailable
   let buffers = null;
   let sources = {};
   let ppPlaying = false;
@@ -2135,7 +2114,7 @@ function buildPracticeCard(stemFilesMap) {
   let playGen = 0;           // incremented on each stop to cancel stale onended
   let duration = 0;
   let rafId = null;
-  let playbackRate = 1;      // 0.8–1.2x — applied to all stems' BufferSourceNodes (+ stretchNodes) in lockstep
+  let playbackRate = 1;      // 1.0–2.0x — applied to all stems' BufferSourceNodes in lockstep
 
   function computedVol(stem) {
     if (muteSet.has(stem)) return 0;
@@ -2172,9 +2151,7 @@ function buildPracticeCard(stemFilesMap) {
       const src = ctx.createBufferSource();
       src.buffer = buffers[stem];
       src.playbackRate.value = playbackRate;
-      const stretch = stretchNodes?.[stem];
-      if (stretch) stretch.playbackRate.value = playbackRate; // cancels the pitch shift from src.playbackRate
-      src.connect(stretch || gainNodes[stem]);
+      src.connect(gainNodes[stem]);
       src.start(when, off);
       sources[stem] = src;
     });
@@ -2271,10 +2248,7 @@ function buildPracticeCard(stemFilesMap) {
       // across the change instead of restarting the sources (which would pop).
       startOffset = getPosition();
       playCtxTime = ctx.currentTime;
-      stems.forEach(stem => {
-        if (sources[stem]) sources[stem].playbackRate.value = rate;
-        if (stretchNodes?.[stem]) stretchNodes[stem].playbackRate.value = rate;
-      });
+      stems.forEach(stem => { if (sources[stem]) sources[stem].playbackRate.value = rate; });
     }
     playbackRate = rate;
     speedLabel.textContent = rate.toFixed(2) + 'x';
@@ -2334,17 +2308,11 @@ function buildPracticeCard(stemFilesMap) {
   (async () => {
     try {
       ctx = new AudioContext();
-      const SoundTouchNode = await loadSoundTouchNode(ctx);
       gainNodes = {};
-      stretchNodes = SoundTouchNode ? {} : null;
       stems.forEach(stem => {
         gainNodes[stem] = ctx.createGain();
         gainNodes[stem].gain.value = 1;
         gainNodes[stem].connect(ctx.destination);
-        if (SoundTouchNode) {
-          stretchNodes[stem] = new SoundTouchNode({ context: ctx });
-          stretchNodes[stem].connect(gainNodes[stem]);
-        }
       });
 
       buffers = {};
