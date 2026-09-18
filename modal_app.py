@@ -41,8 +41,8 @@ gpu_image = (
 # ── Web image — FastAPI only ───────────────────────────────────────────────
 web_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("ffmpeg")
-    .pip_install("fastapi[standard]", "python-multipart", "boto3")
+    .apt_install("ffmpeg", "rubberband-cli", "libsndfile1")
+    .pip_install("fastapi[standard]", "python-multipart", "boto3", "numpy", "soundfile", "pyrubberband")
     .add_local_dir("static", remote_path="/app/static")
 )
 
@@ -493,6 +493,44 @@ def fastapi_app():
             raise HTTPException(status_code=502, detail=str(e))
         return Response(content=data, media_type=ct,
                         headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600"})
+
+    def _stretch_stem(audio_bytes: bytes, rate: float) -> bytes:
+        """Pitch-preserving time-stretch via Rubber Band — see app.py's _stretch_stem
+        for why (tuned for polyphonic full mixes, unlike the WSOLA/phase-vocoder
+        AudioWorklet approach tried earlier)."""
+        import io
+
+        import pyrubberband as pyrb
+        import soundfile as sf
+
+        y, sr = sf.read(io.BytesIO(audio_bytes))
+        y_stretched = pyrb.time_stretch(y, sr, rate)
+        out = io.BytesIO()
+        sf.write(out, y_stretched, sr, format="FLAC")
+        return out.getvalue()
+
+    @web.post("/api/speed")
+    async def api_speed(request: Request):
+        data = await request.json()
+        files = data.get("files") or {}
+        try:
+            rate = float(data.get("rate"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="rate must be a number")
+        if not files or not (0.1 <= rate <= 2.0):
+            raise HTTPException(status_code=400, detail="Invalid files or rate (must be 0.1-2.0)")
+
+        loop = asyncio.get_event_loop()
+
+        async def process_one(fname, b64):
+            try:
+                stretched = await loop.run_in_executor(None, _stretch_stem, base64.b64decode(b64), rate)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Speed change failed on {fname}: {e}")
+            return fname, base64.b64encode(stretched).decode()
+
+        results = await asyncio.gather(*(process_one(f, b) for f, b in files.items()))
+        return {"files": dict(results)}
 
     @web.get("/api/result/{job_id}")
     async def get_result(job_id: str):

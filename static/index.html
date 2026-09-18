@@ -652,6 +652,34 @@
       font-variant-numeric: tabular-nums;
     }
 
+    /* Speed row — applies (server-side, pitch-preserving) only while paused */
+    .pp-speed-row {
+      display: flex; align-items: center; gap: .6rem;
+      padding: .65rem 1.1rem;
+      background: rgba(0,0,0,.14);
+      border-bottom: 1px solid var(--border);
+    }
+    .pp-speed-icon { font-size: .78rem; opacity: .7; flex-shrink: 0; }
+    .pp-speed-slider {
+      flex: 1; accent-color: var(--green); cursor: pointer;
+    }
+    .pp-speed-slider:disabled { opacity: .4; cursor: not-allowed; }
+    .pp-speed-value {
+      font-size: .74rem; font-weight: 600; color: var(--muted);
+      min-width: 38px; text-align: right; font-variant-numeric: tabular-nums;
+      flex-shrink: 0;
+    }
+    .pp-speed-status {
+      display: flex; align-items: center; gap: .4rem;
+      font-size: .74rem; color: var(--green); white-space: nowrap; flex-shrink: 0;
+    }
+    .pp-spinner {
+      width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0;
+      border: 2px solid rgba(142,192,124,.3); border-top-color: var(--green);
+      animation: pp-spin .7s linear infinite;
+    }
+    @keyframes pp-spin { to { transform: rotate(360deg); } }
+
     /* Track section header */
     .pp-tracks-header {
       display: flex; align-items: center; justify-content: space-between;
@@ -2030,6 +2058,13 @@ function buildPracticeCard(stemFilesMap) {
       </div>
       <span class="pp-time">Loading…</span>
     </div>
+    <div class="pp-speed-row">
+      <span class="pp-speed-icon">⏱</span>
+      <input type="range" class="pp-speed-slider" min="0.1" max="2" step="0.1" value="1" disabled
+             title="Playback speed — applies when paused, preserves pitch">
+      <span class="pp-speed-value">1.0x</span>
+      <span class="pp-speed-status hidden"><span class="pp-spinner"></span>Applying…</span>
+    </div>
     <div class="pp-tracks-header">
       <span class="pp-tracks-title">Practice Mode</span>
       <span class="pp-tracks-hint">S = solo &nbsp;·&nbsp; M = mute</span>
@@ -2051,6 +2086,9 @@ function buildPracticeCard(stemFilesMap) {
   const seekTooltip = card.querySelector('.pp-seek-tooltip');
   const timeEl      = card.querySelector('.pp-time');
   const gbBtn       = card.querySelector('.gb-export-btn');
+  const speedSlider = card.querySelector('.pp-speed-slider');
+  const speedValueEl   = card.querySelector('.pp-speed-value');
+  const speedStatusEl  = card.querySelector('.pp-speed-status');
 
   gbBtn.addEventListener('click', async () => {
     gbBtn.disabled = true;
@@ -2091,6 +2129,9 @@ function buildPracticeCard(stemFilesMap) {
   let ctx = null;
   let gainNodes = null;
   let buffers = null;
+  let pristineBytes = null;  // original (rate=1) compressed stem bytes, kept so re-applying
+                             // speed always starts fresh instead of compounding re-stretches
+  let currentRate = 1;
   let sources = {};
   let ppPlaying = false;
   let startOffset = 0;       // seconds into track when play() was last called
@@ -2148,6 +2189,7 @@ function buildPracticeCard(stemFilesMap) {
     ppPlaying = true;
     playBtn.textContent = '⏸';
     playBtn.classList.add('playing');
+    speedSlider.disabled = true; // speed only adjustable while paused (it reprocesses the stems)
   }
 
   function doPause() {
@@ -2155,6 +2197,7 @@ function buildPracticeCard(stemFilesMap) {
     playGen++;
     stems.forEach(stem => { try { sources[stem]?.stop(); } catch(_) {} });
     ppPlaying = false;
+    speedSlider.disabled = false;
     playBtn.textContent = '▶'; playBtn.classList.remove('playing');
   }
 
@@ -2223,6 +2266,52 @@ function buildPracticeCard(stemFilesMap) {
   skipBackBtn.addEventListener('click', () => doSeek(getPosition() - 5));
   skipFwdBtn.addEventListener('click', () => doSeek(getPosition() + 5));
 
+  // Speed change is disabled while playing (see doPlay/doPause) — applying a new rate
+  // re-runs each stem through the server's pitch-preserving time-stretch (rubberband)
+  // and reloads the resulting buffers, so it always starts from the pristine (rate=1)
+  // bytes rather than compounding re-stretches of an already-stretched buffer.
+  let isApplyingSpeed = false;
+  async function applySpeed(rate) {
+    if (ppPlaying || rate === currentRate || isApplyingSpeed) return;
+    isApplyingSpeed = true;
+    const prevValue = speedSlider.value;
+    [playBtn, restartBtn, skipBackBtn, skipFwdBtn, speedSlider, gbBtn].forEach(el => el.disabled = true);
+    speedValueEl.classList.add('hidden');
+    speedStatusEl.classList.remove('hidden');
+    try {
+      const filesB64 = {};
+      stems.forEach(stem => { filesB64[stem] = arrayBufferToBase64(pristineBytes[stem]); });
+      const resp = await fetch('/api/speed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: filesB64, rate }),
+      });
+      if (!resp.ok) throw new Error(await resp.text());
+      const { files } = await resp.json();
+      const fraction = duration ? startOffset / duration : 0;
+      await Promise.all(stems.map(async stem => {
+        const bytes = Uint8Array.from(atob(files[stem]), c => c.charCodeAt(0)).buffer;
+        buffers[stem] = await ctx.decodeAudioData(bytes);
+      }));
+      duration = buffers[stems[0]].duration;
+      startOffset = fraction * duration;
+      currentRate = rate;
+      showT(startOffset);
+    } catch (e) {
+      console.error('Speed change failed:', e);
+      alert('Could not change speed: ' + e.message);
+      speedSlider.value = prevValue;
+    } finally {
+      speedValueEl.textContent = currentRate.toFixed(1) + 'x';
+      speedValueEl.classList.remove('hidden');
+      speedStatusEl.classList.add('hidden');
+      [playBtn, restartBtn, skipBackBtn, skipFwdBtn, speedSlider, gbBtn].forEach(el => el.disabled = false);
+      isApplyingSpeed = false;
+    }
+  }
+
+  speedSlider.addEventListener('change', () => applySpeed(parseFloat(speedSlider.value) || 1));
+
   card.querySelectorAll('.pp-solo-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const stem = btn.dataset.stem;
@@ -2283,6 +2372,7 @@ function buildPracticeCard(stemFilesMap) {
       });
 
       buffers = {};
+      pristineBytes = {};
       let loadedCount = 0;
       timeEl.textContent = `Loading 0 / ${stems.length}…`;
 
@@ -2290,7 +2380,10 @@ function buildPracticeCard(stemFilesMap) {
         async function tryFetch(u) {
           const r = await fetch(u);
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          return ctx.decodeAudioData(await r.arrayBuffer());
+          const bytes = await r.arrayBuffer();
+          // decodeAudioData may detach/transfer its input in some engines — decode a
+          // copy so `bytes` stays valid for re-sending to /api/speed later.
+          return { bytes, buffer: await ctx.decodeAudioData(bytes.slice(0)) };
         }
         if (url.startsWith('blob:')) return tryFetch(url);
         // Try direct R2 up to 3 times (CORS config may take a few seconds to propagate after a cold deploy)
@@ -2305,7 +2398,9 @@ function buildPracticeCard(stemFilesMap) {
       }
 
       await Promise.all(stems.map(async stem => {
-        buffers[stem] = await fetchAndDecode(stemFilesMap[stem]);
+        const { bytes, buffer } = await fetchAndDecode(stemFilesMap[stem]);
+        pristineBytes[stem] = bytes;
+        buffers[stem] = buffer;
         loadedCount++;
         if (loadedCount < stems.length)
           timeEl.textContent = `Loading ${loadedCount} / ${stems.length}…`;
@@ -2317,6 +2412,7 @@ function buildPracticeCard(stemFilesMap) {
       restartBtn.disabled = false;
       skipBackBtn.disabled = false;
       skipFwdBtn.disabled = false;
+      speedSlider.disabled = false;
       gbBtn.disabled = false;
       seekWrap.style.pointerEvents = '';
       startTicker();
@@ -2327,6 +2423,16 @@ function buildPracticeCard(stemFilesMap) {
   })();
 
   return card;
+}
+
+function arrayBufferToBase64(buf) {
+  let binary = '';
+  const bytes = new Uint8Array(buf);
+  const chunkSize = 0x8000; // avoid blowing the call stack on String.fromCharCode.apply for large stems
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
 }
 
 function pauseAll() {

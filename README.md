@@ -53,6 +53,13 @@ brew install ffmpeg      # macOS
 apt install ffmpeg       # Debian / Ubuntu
 ```
 
+**Install Rubber Band** (required for practice mode's pitch-preserving speed control)
+
+```bash
+brew install rubberband        # macOS
+apt install rubberband-cli     # Debian / Ubuntu
+```
+
 **Clone and install**
 
 ```bash

@@ -46,6 +46,10 @@ web = [
     "boto3",
     "python-dotenv",
     "yt-dlp[default]",
+    # Pitch-preserving speed change for practice mode (/api/speed). Shells out to the
+    # `rubberband` CLI — install it separately (brew install rubberband /
+    # apt install rubberband-cli); see CONTRIBUTING.md.
+    "pyrubberband",
 ]
 
 [[tool.uv.index]]

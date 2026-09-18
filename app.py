@@ -230,6 +230,56 @@ async def audio_proxy(url: str):
                     headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600"})
 
 
+def _stretch_stem(audio_bytes: bytes, rate: float) -> bytes:
+    """Pitch-preserving time-stretch via Rubber Band (rubberband CLI, shelled out to
+    by pyrubberband) — chosen over WSOLA/phase-vocoder options (e.g. the AudioWorklet
+    approach tried earlier) because it's specifically tuned for polyphonic full mixes,
+    not just monophonic/speech material."""
+    import io
+
+    import pyrubberband as pyrb
+    import soundfile as sf
+
+    y, sr = sf.read(io.BytesIO(audio_bytes))
+    y_stretched = pyrb.time_stretch(y, sr, rate)
+    out = io.BytesIO()
+    sf.write(out, y_stretched, sr, format="FLAC")
+    return out.getvalue()
+
+
+@app.post("/api/speed")
+async def api_speed(request: Request):
+    """Re-render every stem at a new playback speed with pitch unchanged.
+
+    Runs while paused (see static/index.html's applySpeed): the client always
+    resends the pristine, unstretched stem bytes plus the target absolute rate,
+    so repeated speed changes never compound re-stretches of an already-stretched
+    buffer. Each stem is processed concurrently (rubberband runs as a subprocess,
+    so this parallelizes across stems despite the GIL) to keep total latency close
+    to a single stem's processing time rather than their sum.
+    """
+    data = await request.json()
+    files = data.get("files") or {}
+    try:
+        rate = float(data.get("rate"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "rate must be a number")
+    if not files or not (0.1 <= rate <= 2.0):
+        raise HTTPException(400, "Invalid files or rate (must be 0.1-2.0)")
+
+    loop = asyncio.get_event_loop()
+
+    async def process_one(fname, b64):
+        try:
+            stretched = await loop.run_in_executor(None, _stretch_stem, base64.b64decode(b64), rate)
+        except Exception as e:
+            raise HTTPException(500, f"Speed change failed on {fname}: {e}")
+        return fname, base64.b64encode(stretched).decode()
+
+    results = await asyncio.gather(*(process_one(f, b) for f, b in files.items()))
+    return {"files": dict(results)}
+
+
 @app.get("/api/result/{job_id}")
 async def get_result(job_id: str):
     r2 = _get_r2()
