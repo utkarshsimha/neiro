@@ -44,7 +44,7 @@ slow), `--BigShifts N` (shift-average passes, 1=off/3–11=typical), `--output_f
 
 `app.py` (local) and the `fastapi_app` closure inside `modal_app.py` (Modal) are **independent,
 duplicated implementations** of the same API surface (`/`, `/api/separate`, `/api/youtube`,
-`/api/share`, `/api/result/{job_id}`, `/api/audio-proxy`, R2 helpers, `DEFAULTS` dict). They are
+`/api/share/save`, `/api/result/{job_id}`, `/api/audio-proxy`, R2 helpers, `DEFAULTS` dict). They are
 not imported from a shared module — when changing request/response shapes, defaults, or
 endpoint behavior, **update both files**. `app.py`'s Modal GPU path calls into `modal_app.py`'s
 `separate` function via `ma.separate.remote_gen.aio(...)`; its CPU path calls `inference.py`
@@ -63,15 +63,19 @@ directly in a background thread.
    base64'd, then re-encoded to MP3 for browser playback.
 4. Model checkpoints live on a Modal `Volume` (`mvsep-models`) so they persist across container
    cold starts; `model_volume.commit()` is called after each run.
-5. Saving to the library uploads the finished stems to Cloudflare R2 under `results/{uuid}/`,
-   with a `manifest.json` listing filenames — but not through this server: `POST /api/share/init`
-   returns presigned PUT URLs per stem, the browser PUTs each stem straight to R2, then
-   `POST /api/share/finalize` writes the manifest. Stems are often 100MB+ (lossless FLAC,
-   base64'd) and routing them through one JSON POST here used to hit Modal web endpoints' 150s
-   request timeout on slower connections; direct-to-R2 upload has no such limit.
-   `GET /api/result/{job_id}` returns presigned GET URLs (24h expiry). R2 is optional —
-   configured via `.env` locally (`cp .env.example .env`) or a `cloudflare-r2` Modal secret in
-   production; share/library features silently unavailable if unset.
+5. After separation, the web tier converts stems to MP3 and (when R2 is configured) stages them
+   in Cloudflare R2 under `tmp/{job_id}/`; the SSE `done` message then carries `job_id` plus
+   presigned GET URLs instead of base64 audio (if R2 is unset or staging fails it falls back to
+   inline base64 and Save is unavailable). "Save to library" is `POST /api/share/save`, a
+   server-side copy of `tmp/{job_id}/` → `results/{job_id}/` plus `manifest.json` — the browser
+   never uploads audio. A bucket lifecycle rule (set at startup) expires `tmp/` after a day.
+   Why not upload from the browser: presigned browser→R2 PUTs of stem-sized files failed
+   unpredictably in Safari/WebKit ("Load failed" even at ~5-10 MB, fine in Chromium), and the
+   older single-JSON-POST variant hit Modal's 150s web-endpoint timeout. Note `tmp/` objects are
+   deliberately left in place after a save so the still-open player/download links keep working.
+   `GET /api/result/{job_id}` returns presigned GET URLs for saved results (24h expiry). R2 is
+   optional — configured via `.env` locally (`cp .env.example .env`) or a `cloudflare-r2` Modal
+   secret in production.
 6. YouTube ingestion (`/api/youtube`) calls a self-hosted Cobalt instance (`cobalt_app.py`, a
    separate Modal app — see there for why: yt-dlp run directly from Modal's IPs kept tripping
    bot checks) over HTTP, and strips "(Official Video)"-style junk from titles. Both `app.py`
@@ -127,7 +131,7 @@ web-only dependencies out of `gpu_image`.
 
 `static/index.html` is a single-file vanilla-JS SPA (Gruvbox dark theme) — no build step. It
 POSTs to `/api/separate`, consumes the SSE stream for live progress/log updates, plays stems
-inline, and calls `/api/share` for shareable R2 links.
+inline, and calls `/api/share/save` to keep a result in the library.
 
 ## Known open issues (`fixes.md`)
 

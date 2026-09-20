@@ -34,13 +34,28 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.on_event("startup")
-async def _configure_r2_cors():
+async def _configure_r2_bucket():
+    if not _r2_configured():
+        return
+    r2, bucket = _get_r2(), os.environ["R2_BUCKET_NAME"]
     try:
-        _get_r2().put_bucket_cors(
-            Bucket=os.environ["R2_BUCKET_NAME"],
-            CORSConfiguration={"CORSRules": [{"AllowedHeaders": ["*"], "AllowedMethods": ["GET", "HEAD", "PUT"],
+        r2.put_bucket_cors(
+            Bucket=bucket,
+            CORSConfiguration={"CORSRules": [{"AllowedHeaders": ["*"], "AllowedMethods": ["GET", "HEAD"],
                                                "AllowedOrigins": ["*"], "MaxAgeSeconds": 86400}]},
         )
+    except Exception:
+        pass
+    try:
+        # Unsaved separation results are staged under tmp/ — expire them after a day.
+        try:
+            rules = r2.get_bucket_lifecycle_configuration(Bucket=bucket).get("Rules", [])
+        except Exception:
+            rules = []
+        rules = [r for r in rules if r.get("ID") != "expire-unsaved-runs"]
+        rules.append({"ID": "expire-unsaved-runs", "Status": "Enabled",
+                      "Filter": {"Prefix": f"{_STAGED_PREFIX}/"}, "Expiration": {"Days": 1}})
+        r2.put_bucket_lifecycle_configuration(Bucket=bucket, LifecycleConfiguration={"Rules": rules})
     except Exception:
         pass
 
@@ -59,39 +74,28 @@ async def share_page(job_id: str):
     return FileResponse("static/index.html", headers=_INDEX_HEADERS)
 
 
-@app.post("/api/share/init")
-async def api_share_init(request: Request):
-    """Return presigned PUT URLs so the browser can upload stems straight to R2.
+@app.post("/api/share/save")
+async def api_share_save(request: Request):
+    """Promote a staged separation result into the library.
 
-    Routing the (often 100MB+, lossless-FLAC) stems through this server as a
-    single JSON body used to hit Modal's 150s web-endpoint request timeout on
-    slower connections, leaving the "Saving…" button stuck. Direct-to-R2
-    upload has no such limit.
+    Stems are already in R2 (staged under tmp/ by /api/separate), so saving is just a
+    server-side copy + manifest — the browser never uploads audio. Browser-to-R2
+    uploads of stem-sized files failed unpredictably in Safari/WebKit ("Load failed").
     """
     data = await request.json()
-    filenames = data.get("filenames") or []
-    if not filenames:
-        raise HTTPException(400, "No filenames provided")
+    job_id = data.get("job_id") or ""
+    if not _JOB_ID_RE.match(job_id):
+        raise HTTPException(400, "Invalid job_id")
     try:
         loop = asyncio.get_event_loop()
-        job_id, urls = await loop.run_in_executor(None, _presign_puts, filenames)
-        return {"job_id": job_id, "uploads": urls}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/share/finalize")
-async def api_share_finalize(request: Request):
-    data = await request.json()
-    try:
-        loop = asyncio.get_event_loop()
-        job_id = await loop.run_in_executor(
-            None, _write_manifest, data["job_id"], data["files"],
-            data.get("mode"), data.get("title"), data.get("artist"),
+        await loop.run_in_executor(
+            None, _save_staged, job_id, data.get("mode"), data.get("title"), data.get("artist"),
         )
-        return {"uuid": job_id}
+    except FileNotFoundError:
+        raise HTTPException(404, "This run expired before it was saved — separate the track again.")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(500, str(e))
+    return {"uuid": job_id}
 
 
 @app.get("/api/library")
@@ -321,35 +325,88 @@ def _get_r2():
     )
 
 
+def _r2_configured() -> bool:
+    return all(os.environ.get(k) for k in
+               ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_NAME"))
+
+
+_STAGED_PREFIX = "tmp"  # unsaved separation results; expired by the lifecycle rule in _configure_r2_bucket
+_JOB_ID_RE = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+
+
 def _content_type_for(fname: str) -> str:
-    return "audio/mpeg" if fname.endswith(".mp3") else "application/octet-stream"
+    if fname.endswith(".mp3"):
+        return "audio/mpeg"
+    return "audio/flac" if fname.endswith(".flac") else "application/octet-stream"
 
 
-def _presign_puts(filenames: list[str]) -> tuple[str, dict[str, str]]:
-    """Presign one PUT URL per stem so the browser can upload directly to R2."""
-    r2 = _get_r2()
-    bucket = os.environ["R2_BUCKET_NAME"]
+def _stage_to_r2(paths: dict[str, str]) -> dict:
+    """Upload finished stems to R2 under tmp/{job_id}/ and return the SSE 'done' message
+    carrying presigned GET URLs instead of the audio itself."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    r2, bucket = _get_r2(), os.environ["R2_BUCKET_NAME"]
     job_id = str(uuid.uuid4())
+
+    def put(item):
+        name, path = item
+        with open(path, "rb") as fh:
+            r2.put_object(Bucket=bucket, Key=f"{_STAGED_PREFIX}/{job_id}/{name}",
+                          Body=fh.read(), ContentType=_content_type_for(name))
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(put, paths.items()))
     urls = {
-        fname: r2.generate_presigned_url(
-            "put_object",
-            Params={
-                "Bucket": bucket,
-                "Key": f"results/{job_id}/{fname}",
-                "ContentType": _content_type_for(fname),
-            },
-            ExpiresIn=1800,
-        )
-        for fname in filenames
+        name: r2.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": f"{_STAGED_PREFIX}/{job_id}/{name}",
+                    # so the ⬇ buttons download (cross-origin <a download> is ignored) — <audio> is unaffected
+                    "ResponseContentDisposition": f'attachment; filename="{name}"'},
+            ExpiresIn=86400)
+        for name in paths
     }
-    return job_id, urls
+    return {"type": "done", "job_id": job_id, "files": urls}
+
+
+def _deliver_outputs(paths: dict[str, str]) -> dict:
+    """Build the SSE 'done' message: staged-in-R2 URLs when R2 is configured (Save is then a
+    server-side copy), otherwise — or if staging fails — the audio inline as base64."""
+    if _r2_configured():
+        try:
+            return _stage_to_r2(paths)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+    files = {}
+    for name, path in paths.items():
+        with open(path, "rb") as fh:
+            files[name] = base64.b64encode(fh.read()).decode()
+    return {"type": "done", "files": files}
+
+
+def _save_staged(job_id: str, mode: str | None, title: str | None, artist: str | None) -> None:
+    r2, bucket = _get_r2(), os.environ["R2_BUCKET_NAME"]
+    src = f"{_STAGED_PREFIX}/{job_id}/"
+    names = []
+    for page in r2.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=src):
+        names += [o["Key"][len(src):] for o in page.get("Contents", [])]
+    if not names:
+        try:
+            r2.head_object(Bucket=bucket, Key=f"results/{job_id}/manifest.json")  # already saved
+        except Exception:
+            raise FileNotFoundError(job_id)
+        return
+    for name in names:
+        r2.copy_object(Bucket=bucket, Key=f"results/{job_id}/{name}",
+                       CopySource={"Bucket": bucket, "Key": src + name})
+    _write_manifest(job_id, names, mode, title, artist)
 
 
 def _write_manifest(
     job_id: str, files: list[str],
     mode: str | None = None, title: str | None = None, artist: str | None = None,
 ) -> str:
-    """Write manifest.json for stems the browser already PUT directly to R2."""
+    """Write manifest.json for a job's stems already in R2."""
     r2 = _get_r2()
     bucket = os.environ["R2_BUCKET_NAME"]
     manifest = json.dumps({
@@ -489,24 +546,25 @@ def _flac_to_mp3(flac_path: str) -> str:
     return mp3_path
 
 
-def _encode_outputs(output_dir: str) -> dict[str, str]:
-    """Read each FLAC in output_dir, convert to MP3, return {filename: base64}."""
-    files: dict[str, str] = {}
-    for fname in os.listdir(output_dir):
+def _finalize_outputs(output_dir: str) -> dict:
+    """Convert each FLAC in output_dir to MP3 (in parallel) and build the SSE 'done' message."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    names = os.listdir(output_dir)
+
+    def resolve(fname):
         fpath = os.path.join(output_dir, fname)
         if fname.endswith(".flac"):
             try:
                 mp3 = _flac_to_mp3(fpath)
-                key = os.path.basename(mp3)
-                with open(mp3, "rb") as fh:
-                    files[key] = base64.b64encode(fh.read()).decode()
+                return os.path.basename(mp3), mp3
             except Exception:
-                with open(fpath, "rb") as fh:
-                    files[fname] = base64.b64encode(fh.read()).decode()
-        else:
-            with open(fpath, "rb") as fh:
-                files[fname] = base64.b64encode(fh.read()).decode()
-    return files
+                pass  # keep the FLAC
+        return fname, fpath
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        paths = dict(pool.map(resolve, names))
+    return _deliver_outputs(paths)
 
 
 # ---------------------------------------------------------------------------
@@ -583,8 +641,7 @@ async def api_separate(
                 import traceback
                 _put({"type": "error", "message": traceback.format_exc()})
             else:
-                files = _encode_outputs(output_dir)
-                _put({"type": "done", "files": files})
+                _put(_finalize_outputs(output_dir))
             finally:
                 builtins.print = _orig
                 _put(None)
@@ -605,32 +662,17 @@ async def api_separate(
 
     loop = asyncio.get_event_loop()
 
-    async def _convert_file(fname, b64, fpath):
-        if fname.endswith(".flac"):
-            try:
-                mp3 = await loop.run_in_executor(None, _flac_to_mp3, fpath)
-                with open(mp3, "rb") as fh:
-                    return (os.path.basename(mp3), base64.b64encode(fh.read()).decode())
-            except Exception:
-                return (fname, b64)
-        return (fname, b64)
-
     async def _modal_task():
         import modal_app as ma
         try:
             async for msg in ma.separate.remote_gen.aio(audio_bytes, opts):
                 if msg.get("type") == "result":
-                    files: dict[str, str] = {}
                     with tempfile.TemporaryDirectory() as td:
-                        entries = []
                         for fname, b64 in msg["files"].items():
-                            fpath = os.path.join(td, fname)
-                            with open(fpath, "wb") as fh:
+                            with open(os.path.join(td, fname), "wb") as fh:
                                 fh.write(base64.b64decode(b64))
-                            entries.append((fname, b64, fpath))
-                        results = await asyncio.gather(*[_convert_file(f, b, p) for f, b, p in entries])
-                        files = dict(results)
-                    await q.put({"type": "done", "files": files})
+                        del msg
+                        await q.put(await loop.run_in_executor(None, _finalize_outputs, td))
                 else:
                     await q.put(msg)
         except Exception as exc:

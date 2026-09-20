@@ -108,9 +108,9 @@ make deploy              # builds and deploys to Modal; prints the public URL
 
 ### 3 — R2 storage setup *(optional — shareable links)*
 
-By default, separated stems live only in your browser tab and are lost on refresh. To generate a permanent, shareable link that anyone can open, you need a cloud storage bucket.
+Without a storage bucket, separated stems only exist for the current page load. With one, every separation is staged server-side for 24 hours, and *Save to library* keeps it permanently under a shareable link anyone can open.
 
-Neiro uses [Cloudflare R2](https://www.cloudflare.com/developer-platform/products/r2/) — an S3-compatible object store with no egress fees. When you click *"Create shareable link"* in the UI, the stems are uploaded to your R2 bucket and a UUID-based URL is returned. Anyone with the link can stream the stems for 24 hours.
+Neiro uses [Cloudflare R2](https://www.cloudflare.com/developer-platform/products/r2/) — an S3-compatible object store with no egress fees. Finished stems are written to your bucket by the server (under `tmp/`, auto-expired after a day by a lifecycle rule Neiro sets on startup); *Save to library* copies them to `results/` and returns a UUID-based URL — no audio is ever uploaded from the browser.
 
 **Pricing:** **10 GB free storage per month**. Beyond that, $0.015 / GB / month, with no charges for data transfer out.
 

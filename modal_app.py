@@ -178,30 +178,80 @@ def fastapi_app():
             config=Config(s3={"addressing_style": "path"}),
         )
 
-    def _content_type_for(fname: str) -> str:
-        return "audio/mpeg" if fname.endswith(".mp3") else "application/octet-stream"
+    def _r2_configured() -> bool:
+        return all(os.environ.get(k) for k in
+                   ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_NAME"))
 
-    def _presign_puts(filenames: list) -> tuple:
-        """Presign one PUT URL per stem so the browser can upload directly to R2."""
-        r2 = _get_r2()
-        bucket = os.environ["R2_BUCKET_NAME"]
+    # Unsaved separation results are staged under tmp/ and expired by a bucket lifecycle rule (below).
+    _STAGED_PREFIX = "tmp"
+    _JOB_ID_RE = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+
+    def _content_type_for(fname: str) -> str:
+        if fname.endswith(".mp3"):
+            return "audio/mpeg"
+        return "audio/flac" if fname.endswith(".flac") else "application/octet-stream"
+
+    def _stage_to_r2(paths: dict) -> dict:
+        """Upload finished stems to R2 under tmp/{job_id}/ and return the SSE 'done' message
+        carrying presigned GET URLs instead of the audio itself."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        r2, bucket = _get_r2(), os.environ["R2_BUCKET_NAME"]
         job_id = str(uuid.uuid4())
+
+        def put(item):
+            name, path = item
+            with open(path, "rb") as fh:
+                r2.put_object(Bucket=bucket, Key=f"{_STAGED_PREFIX}/{job_id}/{name}",
+                              Body=fh.read(), ContentType=_content_type_for(name))
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(put, paths.items()))
         urls = {
-            fname: r2.generate_presigned_url(
-                "put_object",
-                Params={
-                    "Bucket": bucket,
-                    "Key": f"results/{job_id}/{fname}",
-                    "ContentType": _content_type_for(fname),
-                },
-                ExpiresIn=1800,
-            )
-            for fname in filenames
+            name: r2.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": bucket, "Key": f"{_STAGED_PREFIX}/{job_id}/{name}",
+                        # so the ⬇ buttons download (cross-origin <a download> is ignored) — <audio> is unaffected
+                        "ResponseContentDisposition": f'attachment; filename="{name}"'},
+                ExpiresIn=86400)
+            for name in paths
         }
-        return job_id, urls
+        return {"type": "done", "job_id": job_id, "files": urls}
+
+    def _deliver_outputs(paths: dict) -> dict:
+        """Build the SSE 'done' message: staged-in-R2 URLs when R2 is configured (Save is then a
+        server-side copy), otherwise — or if staging fails — the audio inline as base64."""
+        if _r2_configured():
+            try:
+                return _stage_to_r2(paths)
+            except Exception:
+                import traceback
+                traceback.print_exc()
+        files = {}
+        for name, path in paths.items():
+            with open(path, "rb") as fh:
+                files[name] = base64.b64encode(fh.read()).decode()
+        return {"type": "done", "files": files}
+
+    def _save_staged(job_id: str, mode: str = None, title: str = None, artist: str = None) -> None:
+        r2, bucket = _get_r2(), os.environ["R2_BUCKET_NAME"]
+        src = f"{_STAGED_PREFIX}/{job_id}/"
+        names = []
+        for page in r2.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=src):
+            names += [o["Key"][len(src):] for o in page.get("Contents", [])]
+        if not names:
+            try:
+                r2.head_object(Bucket=bucket, Key=f"results/{job_id}/manifest.json")  # already saved
+            except Exception:
+                raise FileNotFoundError(job_id)
+            return
+        for name in names:
+            r2.copy_object(Bucket=bucket, Key=f"results/{job_id}/{name}",
+                           CopySource={"Bucket": bucket, "Key": src + name})
+        _write_manifest(job_id, names, mode, title, artist)
 
     def _write_manifest(job_id: str, files: list, mode: str = None, title: str = None, artist: str = None) -> str:
-        """Write manifest.json for stems the browser already PUT directly to R2."""
+        """Write manifest.json for a job's stems already in R2."""
         r2 = _get_r2()
         bucket = os.environ["R2_BUCKET_NAME"]
         manifest = json.dumps({
@@ -271,16 +321,29 @@ def fastapi_app():
             if keys:
                 r2.delete_objects(Bucket=bucket, Delete={"Objects": keys})
 
-    # Configure R2 CORS once at startup so browsers can fetch audio directly
-    # (and PUT stems straight to R2 via presigned URLs — see _presign_puts).
-    try:
-        _get_r2().put_bucket_cors(
-            Bucket=os.environ["R2_BUCKET_NAME"],
-            CORSConfiguration={"CORSRules": [{"AllowedHeaders": ["*"], "AllowedMethods": ["GET", "HEAD", "PUT"],
-                                               "AllowedOrigins": ["*"], "MaxAgeSeconds": 86400}]},
-        )
-    except Exception:
-        pass
+    # Configure the R2 bucket once at startup: CORS so browsers can fetch stems directly, and a
+    # lifecycle rule expiring unsaved (tmp/) separation results after a day.
+    if _r2_configured():
+        _r2, _bucket = _get_r2(), os.environ["R2_BUCKET_NAME"]
+        try:
+            _r2.put_bucket_cors(
+                Bucket=_bucket,
+                CORSConfiguration={"CORSRules": [{"AllowedHeaders": ["*"], "AllowedMethods": ["GET", "HEAD"],
+                                                   "AllowedOrigins": ["*"], "MaxAgeSeconds": 86400}]},
+            )
+        except Exception:
+            pass
+        try:
+            try:
+                _rules = _r2.get_bucket_lifecycle_configuration(Bucket=_bucket).get("Rules", [])
+            except Exception:
+                _rules = []
+            _rules = [r for r in _rules if r.get("ID") != "expire-unsaved-runs"]
+            _rules.append({"ID": "expire-unsaved-runs", "Status": "Enabled",
+                           "Filter": {"Prefix": f"{_STAGED_PREFIX}/"}, "Expiration": {"Days": 1}})
+            _r2.put_bucket_lifecycle_configuration(Bucket=_bucket, LifecycleConfiguration={"Rules": _rules})
+        except Exception:
+            pass
 
     DEFAULTS: dict = {
         "large_gpu": False,
@@ -321,6 +384,26 @@ def fastapi_app():
             capture_output=True, check=True,
         )
         return mp3_path
+
+    def _finalize_outputs(output_dir: str) -> dict:
+        """Convert each FLAC in output_dir to MP3 (in parallel) and build the SSE 'done' message."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        names = os.listdir(output_dir)
+
+        def resolve(fname):
+            fpath = os.path.join(output_dir, fname)
+            if fname.endswith(".flac"):
+                try:
+                    mp3 = _flac_to_mp3(fpath)
+                    return os.path.basename(mp3), mp3
+                except Exception:
+                    pass  # keep the FLAC
+            return fname, fpath
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            paths = dict(pool.map(resolve, names))
+        return _deliver_outputs(paths)
 
     async def _queue_to_sse(q: asyncio.Queue):
         """Drain queue as SSE, sending keepalives every 15 s of silence."""
@@ -429,30 +512,24 @@ def fastapi_app():
     async def share_page(job_id: str):
         return FileResponse("/app/static/index.html", headers=_index_headers)
 
-    @web.post("/api/share/init")
-    async def api_share_init(request: Request):
-        """Presigned R2 PUT URLs — see the docstring on app.py's api_share_init."""
+    @web.post("/api/share/save")
+    async def api_share_save(request: Request):
+        """Promote a staged separation result into the library — see app.py's api_share_save."""
         data = await request.json()
-        filenames = data.get("filenames") or []
-        if not filenames:
-            raise HTTPException(status_code=400, detail="No filenames provided")
+        job_id = data.get("job_id") or ""
+        if not _JOB_ID_RE.match(job_id):
+            raise HTTPException(status_code=400, detail="Invalid job_id")
         try:
-            job_id, urls = await asyncio.get_event_loop().run_in_executor(None, _presign_puts, filenames)
-            return {"job_id": job_id, "uploads": urls}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @web.post("/api/share/finalize")
-    async def api_share_finalize(request: Request):
-        data = await request.json()
-        try:
-            job_id = await asyncio.get_event_loop().run_in_executor(
-                None, _write_manifest, data["job_id"], data["files"],
-                data.get("mode"), data.get("title"), data.get("artist"),
+            await asyncio.get_event_loop().run_in_executor(
+                None, _save_staged, job_id, data.get("mode"), data.get("title"), data.get("artist"),
             )
-            return {"uuid": job_id}
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="This run expired before it was saved — separate the track again.")
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+        return {"uuid": job_id}
 
     @web.get("/api/library")
     async def api_library():
@@ -572,31 +649,16 @@ def fastapi_app():
 
         loop = asyncio.get_event_loop()
 
-        async def _convert(fname, b64, fpath):
-            if fname.endswith(".flac"):
-                try:
-                    mp3 = await loop.run_in_executor(None, _flac_to_mp3, fpath)
-                    with open(mp3, "rb") as fh:
-                        return (os.path.basename(mp3), base64.b64encode(fh.read()).decode())
-                except Exception:
-                    return (fname, b64)
-            return (fname, b64)
-
         async def _task():
             try:
                 async for msg in separate.remote_gen.aio(audio_bytes, opts):
                     if msg.get("type") == "result":
-                        files: dict[str, str] = {}
                         with tempfile.TemporaryDirectory() as td:
-                            entries = []
                             for fname, b64 in msg["files"].items():
-                                fpath = os.path.join(td, fname)
-                                with open(fpath, "wb") as fh:
+                                with open(os.path.join(td, fname), "wb") as fh:
                                     fh.write(base64.b64decode(b64))
-                                entries.append((fname, b64, fpath))
-                            results = await asyncio.gather(*[_convert(f, b, p) for f, b, p in entries])
-                            files = dict(results)
-                        await q.put({"type": "done", "files": files})
+                            del msg
+                            await q.put(await loop.run_in_executor(None, _finalize_outputs, td))
                     else:
                         await q.put(msg)
             except Exception as exc:

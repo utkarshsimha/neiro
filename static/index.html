@@ -1266,7 +1266,7 @@
       <summary>Individual stem downloads</summary>
       <div class="stem-buttons" id="stem-buttons"></div>
     </details>
-    <p class="results-hint hidden" id="results-hint">These stems live only in your browser — save to your library to keep them.</p>
+    <p class="results-hint hidden" id="results-hint">These stems are kept for 24 hours — save to your library to keep them.</p>
     <button id="share-btn" class="share-btn hidden">💾 Save to library</button>
     <div id="share-row" class="share-row hidden">
       <span class="share-label">Share:</span>
@@ -1337,7 +1337,7 @@ let vocalsOnly = false;
 let use6stem = true;
 let abortController = null;
 let blobUrls = [];
-let currentFilesB64 = null;
+let currentJobId = null;   // server-staged separation result (tmp/ in R2) that Save promotes to the library
 
 // Karaoke state
 let isKaraokeMode = false;
@@ -1355,7 +1355,7 @@ let userHoverLyrics = false;
 let lyricJustClicked = false;
 let seekPending = false;
 let seekVersion = 0;
-let currentKaraokeFilesB64 = null;
+let currentKaraokeJobId = null;
 
 // Save-modal state: what the pending Save action should do
 // { kind: 'new', mode: 'practice'|'karaoke' } or { kind: 'rename', jobId }
@@ -1725,7 +1725,7 @@ function handleMessage(msg) {
     progBar.classList.remove('pulsing');
     progBar.style.width = '100%';
     stageSub.textContent = '';
-    showResults(msg.files);
+    showResults(msg.files, false, msg.job_id);
   } else if (msg.type === 'error') {
     showError(msg.message);
   }
@@ -1799,7 +1799,11 @@ function b64ToBlob(b64, mime) {
 
 const PRACTICE_STEMS = ['vocals','bass','drums','guitar','piano','other'];
 
-async function showResults(files, fromShare = false) {
+// `files` is {name: url} when it came from a saved/shared result or was staged server-side
+// (`jobId` set — Save then just promotes that job), or {name: base64} when the server couldn't
+// stage it (R2 unconfigured/failed), in which case there's nothing to save.
+async function showResults(files, fromShare = false, jobId = null) {
+  const filesAreUrls = fromShare || !!jobId;
   blobUrls.forEach(u => URL.revokeObjectURL(u));
   blobUrls = [];
 
@@ -1817,16 +1821,15 @@ async function showResults(files, fromShare = false) {
   stemsDetails.classList.add('hidden');
   shareRow.classList.add('hidden');
 
-  if (fromShare) {
-    currentFilesB64 = null;
-    shareBtn.classList.add('hidden');
-    resultsHint.classList.add('hidden');
-  } else {
-    currentFilesB64 = files;
+  currentJobId = fromShare ? null : jobId;
+  if (currentJobId) {
     shareBtn.classList.remove('hidden');
     shareBtn.disabled = false;
     shareBtn.textContent = '💾 Save to library';
     resultsHint.classList.remove('hidden');
+  } else {
+    shareBtn.classList.add('hidden');
+    resultsHint.classList.add('hidden');
   }
 
   const sorted = Object.keys(files)
@@ -1846,7 +1849,7 @@ async function showResults(files, fromShare = false) {
     const stem = fname.replace(/\.\w+$/, '').split('_').pop();
     const info = MODEL_ICONS[stem] || { icon: '🎵', label: stem };
     let url;
-    if (fromShare) {
+    if (filesAreUrls) {
       url = files[fname];
     } else {
       const mime = fname.endsWith('.mp3') ? 'audio/mpeg' : 'audio/flac';
@@ -2508,42 +2511,20 @@ function fmt(s) {
 }
 
 // ── Save to library (results-card / karaoke-player) ─────────────────────────
-// Stems (often 100MB+ of lossless FLAC) upload straight to R2 via presigned
-// PUT URLs instead of riding along in one big JSON POST through this server
-// — that used to run into Modal web endpoints' 150s request timeout on
-// slower connections, leaving the "Saving…" button stuck with no feedback.
-async function postShare(filesB64, mode, title, artist, onProgress) {
-  const filenames = Object.keys(filesB64);
-  const initResp = await fetch('/api/share/init', {
+// Separation results are staged in R2 by the server (see /api/separate), so saving is a
+// tiny server-side promote — the browser never uploads audio. (Uploading stem-sized files
+// from the browser straight to R2 failed unpredictably in Safari/WebKit: "Load failed".)
+async function saveToLibrary(jobId, mode, title, artist) {
+  const resp = await fetch('/api/share/save', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ filenames }),
+    body: JSON.stringify({ job_id: jobId, mode, title, artist }),
   });
-  if (!initResp.ok) throw new Error(await initResp.text());
-  const { job_id, uploads } = await initResp.json();
-
-  let done = 0;
-  onProgress?.(done, filenames.length);
-  for (const fname of filenames) {
-    const bytes = Uint8Array.from(atob(filesB64[fname]), c => c.charCodeAt(0));
-    const contentType = fname.endsWith('.mp3') ? 'audio/mpeg' : 'application/octet-stream';
-    const putResp = await fetch(uploads[fname], {
-      method: 'PUT',
-      headers: { 'Content-Type': contentType },
-      body: bytes,
-    });
-    if (!putResp.ok) throw new Error(`Upload failed for ${fname} (${putResp.status})`);
-    done++;
-    onProgress?.(done, filenames.length);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => null);
+    throw new Error(err?.detail || resp.statusText);
   }
-
-  const finalizeResp = await fetch('/api/share/finalize', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id, files: filenames, mode, title, artist }),
-  });
-  if (!finalizeResp.ok) throw new Error(await finalizeResp.text());
-  return finalizeResp.json(); // { uuid }
+  return resp.json(); // { uuid }
 }
 
 function openSaveModal(pending, heading, defaultArtist, defaultTitle) {
@@ -2564,13 +2545,13 @@ function closeSaveModal() {
 }
 
 shareBtn.addEventListener('click', () => {
-  if (!currentFilesB64) return;
+  if (!currentJobId) return;
   const parsed = selectedFile ? parseFilename(selectedFile.name) : { artist: '', title: '' };
   openSaveModal({ kind: 'new', mode: 'practice' }, 'Save to library', parsed.artist, parsed.title);
 });
 
 kpSaveBtn.addEventListener('click', () => {
-  if (!currentKaraokeFilesB64) return;
+  if (!currentKaraokeJobId) return;
   openSaveModal({ kind: 'new', mode: 'karaoke' }, 'Save to library', karaokeArtistEl.value, karaokeTitleEl.value);
 });
 
@@ -2593,17 +2574,15 @@ modalSaveBtn.addEventListener('click', async () => {
       });
       if (!resp.ok) throw new Error(await resp.text());
     } else if (pendingSave.mode === 'practice') {
-      if (!currentFilesB64) throw new Error('Nothing to save — separate a track first.');
-      const onProgress = (done, total) => { modalSaveBtn.textContent = `Saving… (${done}/${total})`; };
-      const { uuid } = await postShare(currentFilesB64, 'practice', title, artist, onProgress);
+      if (!currentJobId) throw new Error('Nothing to save — separate a track first.');
+      const { uuid } = await saveToLibrary(currentJobId, 'practice', title, artist);
       shareUrlEl.value = `${location.origin}/result/${uuid}`;
       shareRow.classList.remove('hidden');
       shareBtn.classList.add('hidden');
       resultsHint.classList.add('hidden');
     } else {
-      if (!currentKaraokeFilesB64) throw new Error('Nothing to save — separate a track first.');
-      const onProgress = (done, total) => { modalSaveBtn.textContent = `Saving… (${done}/${total})`; };
-      await postShare(currentKaraokeFilesB64, 'karaoke', title, artist, onProgress);
+      if (!currentKaraokeJobId) throw new Error('Nothing to save — separate a track first.');
+      await saveToLibrary(currentKaraokeJobId, 'karaoke', title, artist);
       kpSaveBtn.textContent = '✓ Saved';
       kpSaveBtn.disabled = true;
     }
@@ -2901,7 +2880,7 @@ resetBtn.addEventListener('click', () => {
   shareBtn.style.borderColor = '';
   shareBtn.style.color = '';
   resultsHint.classList.add('hidden');
-  currentFilesB64 = null;
+  currentJobId = null;
 
   uploadCard.classList.remove('hidden');
 
@@ -3134,7 +3113,7 @@ async function readSSEStreamKaraoke(body, opts, chosenCandidate, artist, title) 
       } else if (msg.type === 'done') {
         progBar.classList.remove('pulsing');
         progBar.style.width = '100%';
-        await showKaraokePlayer(msg.files, chosenCandidate, artist, title);
+        await showKaraokePlayer(msg.files, chosenCandidate, artist, title, false, msg.job_id);
       } else if (msg.type === 'error') {
         showError(msg.message);
       }
@@ -3142,7 +3121,8 @@ async function readSSEStreamKaraoke(body, opts, chosenCandidate, artist, title) 
   }
 }
 
-async function showKaraokePlayer(files, chosenCandidate, artist, title, fromShare = false) {
+async function showKaraokePlayer(files, chosenCandidate, artist, title, fromShare = false, jobId = null) {
+  const filesAreUrls = fromShare || !!jobId;
   kpBlobUrls.forEach(u => URL.revokeObjectURL(u));
   kpBlobUrls = [];
 
@@ -3157,8 +3137,8 @@ async function showKaraokePlayer(files, chosenCandidate, artist, title, fromShar
   const instrumKey = Object.keys(files).find(k => k.includes('instrum') && !k.includes('instrum2'));
   const vocalsKey  = Object.keys(files).find(k => k.includes('vocals'));
 
-  const instrumUrl = fromShare ? files[instrumKey] : mkBlobUrl(files[instrumKey], instrumKey.split('.').pop());
-  const vocalsUrl  = fromShare ? files[vocalsKey]  : mkBlobUrl(files[vocalsKey],  vocalsKey.split('.').pop());
+  const instrumUrl = filesAreUrls ? files[instrumKey] : mkBlobUrl(files[instrumKey], instrumKey.split('.').pop());
+  const vocalsUrl  = filesAreUrls ? files[vocalsKey]  : mkBlobUrl(files[vocalsKey],  vocalsKey.split('.').pop());
 
   kpAudioInstrum.src = instrumUrl;
   kpAudioVocals.src  = vocalsUrl;
@@ -3168,8 +3148,10 @@ async function showKaraokePlayer(files, chosenCandidate, artist, title, fromShar
   kpSongTitle.textContent  = title  || 'Unknown Title';
   kpSongArtist.textContent = artist || 'Unknown Artist';
 
-  currentKaraokeFilesB64 = fromShare ? null : files;
-  kpSaveBtn.classList.toggle('hidden', fromShare);
+  currentKaraokeJobId = fromShare ? null : jobId;
+  kpSaveBtn.classList.toggle('hidden', !currentKaraokeJobId);
+  kpSaveBtn.disabled = false;
+  kpSaveBtn.textContent = '💾 Save';
 
   homeView.classList.add('hidden');
   uploadFlow.classList.add('hidden');
@@ -3366,7 +3348,7 @@ kpResetBtn.addEventListener('click', () => {
   karaokeStartBtn.disabled = true;
   karaokeArtistEl.value = '';
   karaokeTitleEl.value  = '';
-  currentKaraokeFilesB64 = null;
+  currentKaraokeJobId = null;
 
   const box = uploadCard.querySelector('.error-box');
   if (box) box.remove();
