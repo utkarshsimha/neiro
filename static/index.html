@@ -2385,6 +2385,7 @@ function buildPracticeCard(stemFilesMap) {
 
   practicePlayer = {
     pause:   () => { if (ppPlaying) doPause(); },
+    seekBy:  delta => { if (duration && !isApplyingSpeed) doSeek(getPosition() + delta); },
     destroy: () => {
       if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
       playGen++;
@@ -2468,6 +2469,28 @@ function arrayBufferToBase64(buf) {
   }
   return btoa(binary);
 }
+
+// ── Keyboard: ←/→ seek ∓/±5s (practice mixer or karaoke player) ─────────────
+document.addEventListener('keydown', e => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+  const t = e.target;
+  // Leave arrows alone in anything that uses them natively (speed slider, text fields, ...)
+  if (t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+  if (!saveModal.classList.contains('hidden')) return;
+
+  const delta = e.key === 'ArrowRight' ? 5 : -5;
+  if (!karaokePlayerCard.classList.contains('hidden') && kpAudioInstrum.duration) {
+    const target = Math.max(0, Math.min(kpAudioInstrum.duration, kpAudioInstrum.currentTime + delta));
+    kpAudioInstrum.currentTime = target;
+    kpAudioVocals.currentTime = target;
+  } else if (practicePlayer) {
+    practicePlayer.seekBy(delta);
+  } else {
+    return;
+  }
+  e.preventDefault();
+});
 
 function pauseAll() {
   document.querySelectorAll('.stem-audio').forEach(a => {
