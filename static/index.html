@@ -2338,10 +2338,12 @@ function buildPracticeCard(stemFilesMap, r2Source = null) {
         resp = await postSpeed({ files: filesB64, rate });
       }
       if (!resp.ok) throw new Error(await resp.text());
-      const { files } = await resp.json();
+      const { delivery, files } = await resp.json();
       const fraction = duration ? startOffset / duration : 0;
       await Promise.all(stems.map(async stem => {
-        const bytes = Uint8Array.from(atob(files[stem]), c => c.charCodeAt(0)).buffer;
+        const bytes = delivery === 'url'
+          ? (await fetchStemBytes(files[stem])).buffer
+          : Uint8Array.from(atob(files[stem]), c => c.charCodeAt(0)).buffer;
         buffers[stem] = await ctx.decodeAudioData(bytes);
       }));
       duration = buffers[stems[0]].duration;

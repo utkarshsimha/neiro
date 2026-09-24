@@ -616,7 +616,7 @@ def fastapi_app():
     @web.post("/api/speed")
     async def api_speed(request: Request):
         """Re-render every stem at a new speed, pitch unchanged — see app.py's api_speed for
-        the two request shapes (stems read from R2, or uploaded as base64)."""
+        the two request shapes (stems read from R2, or uploaded as base64) and delivery."""
         from botocore.exceptions import ClientError
 
         data = await request.json()
@@ -642,8 +642,10 @@ def fastapi_app():
                 raise HTTPException(status_code=400, detail="No stems given")
             inputs = {stem: ("b64", b64) for stem, b64 in files.items()}
 
-        r2 = _get_r2() if source else None  # boto3 clients are thread-safe
+        deliver_via_r2 = _r2_configured()
+        r2 = _get_r2() if deliver_via_r2 else None  # boto3 clients are thread-safe
         bucket = os.environ.get("R2_BUCKET_NAME")
+        out_id = str(uuid.uuid4())
 
         def process_one(stem: str, kind: str, ref: str) -> str:
             with tempfile.TemporaryDirectory() as workdir:
@@ -658,8 +660,16 @@ def fastapi_app():
                 else:
                     with open(src, "wb") as fh:
                         fh.write(base64.b64decode(ref))
-                with open(_stretch_stem(src, rate, workdir), "rb") as fh:
-                    return base64.b64encode(fh.read()).decode()
+                out_path = _stretch_stem(src, rate, workdir)
+                if deliver_via_r2:
+                    key = f"{_STAGED_PREFIX}/{out_id}/{stem}.flac"
+                    r2.upload_file(out_path, bucket, key, ExtraArgs={"ContentType": "audio/flac"})
+                    result = r2.generate_presigned_url(
+                        "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=86400)
+                else:
+                    with open(out_path, "rb") as fh:
+                        result = base64.b64encode(fh.read()).decode()
+                return result
 
         loop = asyncio.get_running_loop()
 
@@ -672,7 +682,7 @@ def fastapi_app():
                 raise HTTPException(status_code=500, detail=f"Speed change failed on {stem}: {e}")
 
         results = await asyncio.gather(*(run_one(s, k, r) for s, (k, r) in inputs.items()))
-        return {"files": dict(results)}
+        return {"delivery": "url" if deliver_via_r2 else "base64", "files": dict(results)}
 
     @web.get("/api/result/{job_id}")
     async def get_result(job_id: str):

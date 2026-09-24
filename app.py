@@ -281,8 +281,10 @@ async def api_speed(request: Request):
       {rate, files: {stem: base64}}
           Fallback when the result isn't in R2.
 
-    The stretched FLACs come back inline as base64. Profiling showed the base64 upload
-    dominating on long tracks (~250 MB for 21 minutes).
+    With R2 configured the stretched FLACs are written under tmp/<new id>/ (expired with
+    the rest of tmp/) and the response carries presigned URLs ({"delivery": "url"});
+    otherwise they come back inline as base64 ({"delivery": "base64"}). Profiling showed
+    base64 over JSON dominating on long tracks (~250 MB up, ~530 MB down for 21 minutes).
     Each stem is processed concurrently (the heavy lifting is in ffmpeg/rubberband
     subprocesses, so this parallelizes despite the GIL) to keep total latency close to a
     single stem's processing time rather than their sum.
@@ -312,8 +314,10 @@ async def api_speed(request: Request):
             raise HTTPException(400, "No stems given")
         inputs = {stem: ("b64", b64) for stem, b64 in files.items()}
 
-    r2 = _get_r2() if source else None  # boto3 clients are thread-safe
+    deliver_via_r2 = _r2_configured()
+    r2 = _get_r2() if deliver_via_r2 else None  # boto3 clients are thread-safe
     bucket = os.environ.get("R2_BUCKET_NAME")
+    out_id = str(uuid.uuid4())
 
     def process_one(stem: str, kind: str, ref: str) -> str:
         with tempfile.TemporaryDirectory() as workdir:
@@ -328,8 +332,16 @@ async def api_speed(request: Request):
             else:
                 with open(src, "wb") as fh:
                     fh.write(base64.b64decode(ref))
-            with open(_stretch_stem(src, rate, workdir), "rb") as fh:
-                return base64.b64encode(fh.read()).decode()
+            out_path = _stretch_stem(src, rate, workdir)
+            if deliver_via_r2:
+                key = f"{_STAGED_PREFIX}/{out_id}/{stem}.flac"
+                r2.upload_file(out_path, bucket, key, ExtraArgs={"ContentType": "audio/flac"})
+                result = r2.generate_presigned_url(
+                    "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=86400)
+            else:
+                with open(out_path, "rb") as fh:
+                    result = base64.b64encode(fh.read()).decode()
+            return result
 
     loop = asyncio.get_running_loop()
 
@@ -342,7 +354,7 @@ async def api_speed(request: Request):
             raise HTTPException(500, f"Speed change failed on {stem}: {e}")
 
     results = await asyncio.gather(*(run_one(s, k, r) for s, (k, r) in inputs.items()))
-    return {"files": dict(results)}
+    return {"delivery": "url" if deliver_via_r2 else "base64", "files": dict(results)}
 
 
 @app.get("/api/result/{job_id}")

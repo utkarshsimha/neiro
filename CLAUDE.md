@@ -94,11 +94,13 @@ directly in a background thread.
    flight, and every request starts from the pristine (rate=1) stems rather than the
    currently-loaded buffers (so repeated speed changes don't compound re-stretches). When
    the stems are in R2 the client sends just their location (`source: {prefix: "tmp/<id>" |
-   "results/<id>", files}`) and the server reads them from the bucket; otherwise (or on a
-   404 when a staged copy expired) the client uploads the pristine bytes as base64.
-   Profiling a 21-minute, 6-stem track showed the ~250 MB base64 upload as a large cost
-   next to the stretch itself. The stretched stems come back as base64. Stems are
-   processed concurrently to stay under Modal's 150s web endpoint timeout.
+   "results/<id>", files}`) and the server reads them from the bucket and writes the
+   stretched FLACs back under `tmp/`, returning presigned URLs; otherwise (or on a 404 when
+   a staged copy expired) the client uploads the pristine bytes as base64 and gets base64
+   back. Profiling a 21-minute, 6-stem track showed base64-over-JSON transfer (~250 MB up,
+   ~530 MB down) and Python-side MP3 decoding as large costs next to the stretch itself;
+   MP3 output was benchmarked and rejected (encoding costs more than the smaller download
+   saves). Stems are processed concurrently to stay under Modal's 150s web endpoint timeout.
    Rubber Band was chosen after an earlier real-time AudioWorklet approach (SoundTouchJS)
    produced audible quality degradation on polyphonic stems — see git history — and
    offline batch processing has no such real-time-DSP quality ceiling.
