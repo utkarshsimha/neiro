@@ -234,21 +234,31 @@ async def audio_proxy(url: str):
                     headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600"})
 
 
-def _stretch_stem(audio_bytes: bytes, rate: float) -> bytes:
-    """Pitch-preserving time-stretch via Rubber Band (rubberband CLI, shelled out to
-    by pyrubberband) — chosen over WSOLA/phase-vocoder options (e.g. the AudioWorklet
-    approach tried earlier) because it's specifically tuned for polyphonic full mixes,
-    not just monophonic/speech material."""
-    import io
+def _run_cmd(cmd: list[str]) -> None:
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"{cmd[0]} failed: {proc.stderr.strip()[-500:]}")
 
-    import pyrubberband as pyrb
-    import soundfile as sf
 
-    y, sr = sf.read(io.BytesIO(audio_bytes))
-    y_stretched = pyrb.time_stretch(y, sr, rate)
-    out = io.BytesIO()
-    sf.write(out, y_stretched, sr, format="FLAC")
-    return out.getvalue()
+def _stretch_stem(src_path: str, rate: float, workdir: str) -> str:
+    """Pitch-preserving time-stretch via Rubber Band — chosen over WSOLA/phase-vocoder
+    options (e.g. the AudioWorklet approach tried earlier) because it's specifically tuned
+    for polyphonic full mixes, not just monophonic/speech material.
+
+    Runs the rubberband CLI directly on files — the same `rubberband -q --tempo <rate>`
+    call on 16-bit WAV that pyrubberband made — with ffmpeg decoding before and encoding
+    FLAC after. Decoding the MP3 in Python via soundfile took ~11s per stem on a 21-minute
+    track on Modal; ffmpeg does it in under a second. Returns the output FLAC's path."""
+    wav_in = os.path.join(workdir, "in.wav")
+    wav_out = os.path.join(workdir, "stretched.wav")
+    flac_out = os.path.join(workdir, "out.flac")
+    _run_cmd(["ffmpeg", "-loglevel", "error", "-y", "-i", src_path, "-c:a", "pcm_s16le", wav_in])
+    if rate == 1.0:
+        wav_out = wav_in  # like pyrubberband, don't run a no-op stretch
+    else:
+        _run_cmd(["rubberband", "-q", "--tempo", str(rate), wav_in, wav_out])
+    _run_cmd(["ffmpeg", "-loglevel", "error", "-y", "-i", wav_out, "-c:a", "flac", flac_out])
+    return flac_out
 
 
 @app.post("/api/speed")
@@ -273,14 +283,21 @@ async def api_speed(request: Request):
 
     loop = asyncio.get_event_loop()
 
-    async def process_one(fname, b64):
+    def process_one(b64: str) -> str:
+        with tempfile.TemporaryDirectory() as workdir:
+            src = os.path.join(workdir, "src")
+            with open(src, "wb") as fh:
+                fh.write(base64.b64decode(b64))
+            with open(_stretch_stem(src, rate, workdir), "rb") as fh:
+                return base64.b64encode(fh.read()).decode()
+
+    async def run_one(fname, b64):
         try:
-            stretched = await loop.run_in_executor(None, _stretch_stem, base64.b64decode(b64), rate)
+            return fname, await loop.run_in_executor(None, process_one, b64)
         except Exception as e:
             raise HTTPException(500, f"Speed change failed on {fname}: {e}")
-        return fname, base64.b64encode(stretched).decode()
 
-    results = await asyncio.gather(*(process_one(f, b) for f, b in files.items()))
+    results = await asyncio.gather(*(run_one(f, b) for f, b in files.items()))
     return {"files": dict(results)}
 
 

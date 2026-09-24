@@ -87,15 +87,17 @@ directly in a background thread.
    separation pipeline (see the note in `cobalt_app.py` on why there's no token-provider
    sidecar: it hits the same IP-blocking problem it's meant to solve).
 7. Practice mode's speed control (`/api/speed`) re-renders every stem at a new tempo via
-   Rubber Band (`pyrubberband`, shelling out to the `rubberband` CLI — `_stretch_stem` in
-   both files) without shifting pitch. It only runs while paused: the frontend disables the
-   slider during playback and while a request is in flight, always resends the pristine
-   (rate=1) stem bytes it kept from the initial load rather than the currently-loaded
-   buffers (so repeated speed changes don't compound re-stretches), and reprocesses each
-   stem concurrently to stay well under Modal's 150s web endpoint timeout even on long
-   songs. Rubber Band was chosen after an earlier real-time AudioWorklet approach
-   (SoundTouchJS) produced audible quality degradation on polyphonic stems — see git
-   history — and offline batch processing has no such real-time-DSP quality ceiling.
+   Rubber Band (the `rubberband` CLI run directly on WAV files, with ffmpeg decoding before
+   and encoding FLAC after — `_stretch_stem` in both files; decoding the MP3s in Python via
+   soundfile was ~6x slower on long tracks) without shifting pitch. It only runs while
+   paused: the frontend disables the slider during playback and while a request is in
+   flight, always resends the pristine (rate=1) stem bytes it kept from the initial load
+   rather than the currently-loaded buffers (so repeated speed changes don't compound
+   re-stretches), and reprocesses each stem concurrently to stay well under Modal's 150s
+   web endpoint timeout even on long songs.
+   Rubber Band was chosen after an earlier real-time AudioWorklet approach (SoundTouchJS)
+   produced audible quality degradation on polyphonic stems — see git history — and
+   offline batch processing has no such real-time-DSP quality ceiling.
    Requires the `rubberband` CLI (`brew install rubberband` / `apt install rubberband-cli`
    locally; `rubberband-cli` in `modal_app.py`'s `web_image`).
 
