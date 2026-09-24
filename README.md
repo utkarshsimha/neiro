@@ -106,11 +106,11 @@ make deploy              # builds and deploys to Modal; prints the public URL
 
 ---
 
-### 3 — R2 storage setup *(optional — shareable links)*
+### 3 — R2 storage setup *(optional — needed for the library and shareable links)*
 
-Without a storage bucket, separated stems only exist for the current page load. With one, every separation is staged server-side for 24 hours, and *Save to library* keeps it permanently under a shareable link anyone can open.
+Without a storage bucket, separated stems only exist for the current page load, and there is no library. With one, every separation is staged server-side for 24 hours, and *Save to library* keeps it permanently under a shareable link anyone can open.
 
-Neiro uses [Cloudflare R2](https://www.cloudflare.com/developer-platform/products/r2/) — an S3-compatible object store with no egress fees. Finished stems are written to your bucket by the server (under `tmp/`, auto-expired after a day by a lifecycle rule Neiro sets on startup); *Save to library* copies them to `results/` and returns a UUID-based URL — no audio is ever uploaded from the browser.
+Neiro uses [Cloudflare R2](https://www.cloudflare.com/developer-platform/products/r2/) — an S3-compatible object store with no egress fees. Finished stems are written to your bucket by the server (under `tmp/`, auto-expired after a day by a lifecycle rule — see step 6 below); *Save to library* copies them to `results/` and returns a UUID-based URL — no audio is ever uploaded from the browser.
 
 **Pricing:** **10 GB free storage per month**. Beyond that, $0.015 / GB / month, with no charges for data transfer out.
 

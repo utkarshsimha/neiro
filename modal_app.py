@@ -144,11 +144,31 @@ def separate(audio_bytes: bytes, options_dict: dict):
 
 # ── Web endpoint ───────────────────────────────────────────────────────────
 
+def _optional_secret(name: str) -> modal.Secret:
+    """The named secret if it exists, else an empty one, so deploys work without it.
+
+    Always returns exactly one secret: Modal checks that a container declares the same
+    number of dependencies as the deployed function, so this can't vary between deploy
+    time and container start. Inside the container the returned object is just a
+    placeholder that gets bound to whichever secret was attached at deploy.
+    """
+    secret = modal.Secret.from_name(name)
+    if not modal.is_local():
+        return secret
+    try:
+        secret.hydrate()
+    except modal.exception.NotFoundError:
+        print(f"Modal secret '{name}' not found — deploying without it.")
+        return modal.Secret.from_dict({})
+    return secret
+
+
 @app.function(
     image=web_image,
     timeout=3600,
     scaledown_window=300,
-    secrets=[modal.Secret.from_name("cloudflare-r2"), modal.Secret.from_name("cobalt")],
+    # R2 is optional: without it results fall back to inline audio and Save is unavailable.
+    secrets=[_optional_secret("cloudflare-r2"), modal.Secret.from_name("cobalt")],
 )
 @modal.asgi_app()
 def fastapi_app():
