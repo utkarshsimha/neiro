@@ -19,6 +19,7 @@ make web      # uv run uvicorn app:app --reload --port 8000 — local CPU dev se
 make deploy   # deploys to Modal (GPU) under both the "neiro" and legacy "song-lab" app
               # names, so previously shared song-lab URLs keep working
 make run INPUT=song.mp3 [OUTPUT=./output] [CPU=1]   # CLI separation via inference.py
+make r2-setup [BUCKET=neiro]   # one-time R2 bucket config (CORS + tmp/ expiry) via wrangler
 make clean    # remove .venv, __pycache__, output/
 ```
 
@@ -68,7 +69,11 @@ directly in a background thread.
    presigned GET URLs instead of base64 audio (if R2 is unset or staging fails it falls back to
    inline base64 and Save is unavailable). "Save to library" is `POST /api/share/save`, a
    server-side copy of `tmp/{job_id}/` → `results/{job_id}/` plus `manifest.json` — the browser
-   never uploads audio. A bucket lifecycle rule (set at startup) expires `tmp/` after a day.
+   never uploads audio. A bucket lifecycle rule expires `tmp/` after a day; it and the
+   bucket's CORS policy (`r2-cors.json`) are set once with `make r2-setup`, which runs
+   `wrangler` under the user's own Cloudflare login. The app doesn't set them itself: that
+   needs an Admin Read & Write token (account-wide, can delete buckets), whereas the app's
+   long-lived token is Object Read & Write scoped to the one bucket.
    Why not upload from the browser: presigned browser→R2 PUTs of stem-sized files failed
    unpredictably in Safari/WebKit ("Load failed" even at ~5-10 MB, fine in Chromium), and the
    older single-JSON-POST variant hit Modal's 150s web-endpoint timeout. Note `tmp/` objects are

@@ -202,7 +202,8 @@ def fastapi_app():
         return all(os.environ.get(k) for k in
                    ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_NAME"))
 
-    # Unsaved separation results are staged under tmp/ and expired by a bucket lifecycle rule (below).
+    # Unsaved separation results are staged under tmp/ and expired by the bucket lifecycle rule
+    # `make r2-setup` sets.
     _STAGED_PREFIX = "tmp"
     _JOB_ID_RE = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
 
@@ -340,30 +341,6 @@ def fastapi_app():
             keys = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
             if keys:
                 r2.delete_objects(Bucket=bucket, Delete={"Objects": keys})
-
-    # Configure the R2 bucket once at startup: CORS so browsers can fetch stems directly, and a
-    # lifecycle rule expiring unsaved (tmp/) separation results after a day.
-    if _r2_configured():
-        _r2, _bucket = _get_r2(), os.environ["R2_BUCKET_NAME"]
-        try:
-            _r2.put_bucket_cors(
-                Bucket=_bucket,
-                CORSConfiguration={"CORSRules": [{"AllowedHeaders": ["*"], "AllowedMethods": ["GET", "HEAD"],
-                                                   "AllowedOrigins": ["*"], "MaxAgeSeconds": 86400}]},
-            )
-        except Exception:
-            pass
-        try:
-            try:
-                _rules = _r2.get_bucket_lifecycle_configuration(Bucket=_bucket).get("Rules", [])
-            except Exception:
-                _rules = []
-            _rules = [r for r in _rules if r.get("ID") != "expire-unsaved-runs"]
-            _rules.append({"ID": "expire-unsaved-runs", "Status": "Enabled",
-                           "Filter": {"Prefix": f"{_STAGED_PREFIX}/"}, "Expiration": {"Days": 1}})
-            _r2.put_bucket_lifecycle_configuration(Bucket=_bucket, LifecycleConfiguration={"Rules": _rules})
-        except Exception:
-            pass
 
     DEFAULTS: dict = {
         "large_gpu": False,

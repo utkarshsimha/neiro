@@ -33,33 +33,6 @@ app = FastAPI(title="Neiro")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-@app.on_event("startup")
-async def _configure_r2_bucket():
-    if not _r2_configured():
-        return
-    r2, bucket = _get_r2(), os.environ["R2_BUCKET_NAME"]
-    try:
-        r2.put_bucket_cors(
-            Bucket=bucket,
-            CORSConfiguration={"CORSRules": [{"AllowedHeaders": ["*"], "AllowedMethods": ["GET", "HEAD"],
-                                               "AllowedOrigins": ["*"], "MaxAgeSeconds": 86400}]},
-        )
-    except Exception:
-        pass
-    try:
-        # Unsaved separation results are staged under tmp/ — expire them after a day.
-        try:
-            rules = r2.get_bucket_lifecycle_configuration(Bucket=bucket).get("Rules", [])
-        except Exception:
-            rules = []
-        rules = [r for r in rules if r.get("ID") != "expire-unsaved-runs"]
-        rules.append({"ID": "expire-unsaved-runs", "Status": "Enabled",
-                      "Filter": {"Prefix": f"{_STAGED_PREFIX}/"}, "Expiration": {"Days": 1}})
-        r2.put_bucket_lifecycle_configuration(Bucket=bucket, LifecycleConfiguration={"Rules": rules})
-    except Exception:
-        pass
-
-
 _INDEX_HEADERS = {"Cache-Control": "no-cache"}  # always revalidate — this is a single-file SPA,
 # so a stale cached copy after a deploy silently keeps calling removed/changed API routes
 
@@ -403,7 +376,7 @@ def _r2_configured() -> bool:
                ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_NAME"))
 
 
-_STAGED_PREFIX = "tmp"  # unsaved separation results; expired by the lifecycle rule in _configure_r2_bucket
+_STAGED_PREFIX = "tmp"  # unsaved separation results; expired by the lifecycle rule `make r2-setup` sets
 _JOB_ID_RE = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
 
 
