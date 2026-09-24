@@ -197,7 +197,7 @@ models/               Model checkpoints — downloaded automatically on first ru
 
 Pre-trained weights are downloaded automatically to `models/` on first use. Key model sources:
 
-- **6-stem BSRoformer** — [jarredou/BS-ROFO-SW-Fixed](https://huggingface.co/jarredou/BS-ROFO-SW-Fixed) on Hugging Face
+- **6-stem BSRoformer** — [jarredou/BS-ROFO-SW-Fixed](https://huggingface.co/jarredou/BS-ROFO-SW-Fixed) on Hugging Face (downloaded from the [enerjazzer/BS-ROFO-SW-Fixed](https://huggingface.co/enerjazzer/BS-ROFO-SW-Fixed) mirror, since the original is no longer public)
 - **MelBandRoformer** — [KimberleyJSN/melbandroformer](https://huggingface.co/KimberleyJSN/melbandroformer) on Hugging Face
 - **BSRoformer / InstVoc / MDX models** — [TRvlvr model repo](https://github.com/TRvlvr/model_repo)
 

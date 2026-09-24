@@ -512,8 +512,9 @@ class EnsembleDemucsMDXMusicSeparationModel:
 
         elif model_name == "BSRoformer6Stem" and not hasattr(self, 'model_bs6'):
             print(f'Loading {model_name} into memory')
-            remote_url_ckpt = 'https://huggingface.co/jarredou/BS-ROFO-SW-Fixed/resolve/main/BS-Rofo-SW-Fixed.ckpt'
-            remote_url_yaml = 'https://huggingface.co/jarredou/BS-ROFO-SW-Fixed/resolve/main/BS-Rofo-SW-Fixed.yaml'
+            # Mirror: the original jarredou/BS-ROFO-SW-Fixed repo is no longer public (401).
+            remote_url_ckpt = 'https://huggingface.co/enerjazzer/BS-ROFO-SW-Fixed/resolve/main/BS-Rofo-SW-Fixed.ckpt'
+            remote_url_yaml = 'https://huggingface.co/enerjazzer/BS-ROFO-SW-Fixed/resolve/main/BS-Rofo-SW-Fixed.yaml'
             self.model_bs6, self.config_bs6 = self.load_model('BS-Rofo-SW-Fixed', remote_url_ckpt, remote_url_yaml, BSRoformer)
 
     @property
