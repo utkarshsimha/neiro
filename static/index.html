@@ -1801,7 +1801,8 @@ const PRACTICE_STEMS = ['vocals','bass','drums','guitar','piano','other'];
 
 // `files` is {name: url} when it came from a saved/shared result or was staged server-side
 // (`jobId` set — Save then just promotes that job), or {name: base64} when the server couldn't
-// stage it (R2 unconfigured/failed), in which case there's nothing to save.
+// stage it (R2 unconfigured/failed), in which case there's nothing to save. For a saved/shared
+// result `jobId` is its library id (used only to let /api/speed read the stems from R2).
 async function showResults(files, fromShare = false, jobId = null) {
   const filesAreUrls = fromShare || !!jobId;
   blobUrls.forEach(u => URL.revokeObjectURL(u));
@@ -1844,6 +1845,7 @@ async function showResults(files, fromShare = false, jobId = null) {
     });
 
   const stemFiles = {};
+  const stemNames = {};  // stem -> filename, so /api/speed can find it in R2
 
   for (const fname of sorted) {
     const stem = fname.replace(/\.\w+$/, '').split('_').pop();
@@ -1857,7 +1859,7 @@ async function showResults(files, fromShare = false, jobId = null) {
       blobUrls.push(url);
     }
     stemButtons.appendChild(buildStemCard(info, url, fname));
-    if (PRACTICE_STEMS.includes(stem)) stemFiles[stem] = url;
+    if (PRACTICE_STEMS.includes(stem)) { stemFiles[stem] = url; stemNames[stem] = fname; }
     // Yield between files so browser stays responsive
     await new Promise(r => setTimeout(r, 0));
   }
@@ -1865,7 +1867,11 @@ async function showResults(files, fromShare = false, jobId = null) {
   // Practice Mode is the main event when we have enough stems to mix — the
   // individual per-stem players are then just a secondary download option.
   if (Object.keys(stemFiles).length >= 3) {
-    const pc = buildPracticeCard(stemFiles);
+    // Where the stems live in R2 (saved → results/, fresh run → staged tmp/), if they do.
+    const r2Source = jobId
+      ? { prefix: `${fromShare ? 'results' : 'tmp'}/${jobId}`, files: stemNames }
+      : null;
+    const pc = buildPracticeCard(stemFiles, r2Source);
     practiceMount.appendChild(pc);
     stemsDetails.classList.remove('hidden');
   } else {
@@ -2033,7 +2039,9 @@ function buildZip(entries) {
   return new Blob([...localParts, ...centralParts, new Uint8Array(endRecord.buffer)], { type: 'application/zip' });
 }
 
-function buildPracticeCard(stemFilesMap) {
+// `r2Source` ({prefix, files: {stem: filename}}) says where the stems are in R2, so speed
+// changes can have the server read them there instead of re-uploading; null if they aren't.
+function buildPracticeCard(stemFilesMap, r2Source = null) {
   const STEM_ORDER = ['vocals','bass','drums','guitar','piano','other'];
   const stems = STEM_ORDER.filter(s => stemFilesMap[s]);
 
@@ -2316,13 +2324,19 @@ function buildPracticeCard(stemFilesMap) {
     [playBtn, restartBtn, skipBackBtn, skipFwdBtn, speedSlider, speedApplyBtn, gbBtn].forEach(el => el.disabled = true);
     speedStatusEl.classList.remove('hidden');
     try {
-      const filesB64 = {};
-      stems.forEach(stem => { filesB64[stem] = arrayBufferToBase64(pristineBytes[stem]); });
-      const resp = await fetch('/api/speed', {
+      const postSpeed = body => fetch('/api/speed', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ files: filesB64, rate }),
+        body: JSON.stringify(body),
       });
+      // Preferably the server reads the stems straight from R2; if they aren't there
+      // (no R2, or the staged copy expired → 404) upload the pristine bytes instead.
+      let resp = r2Source ? await postSpeed({ source: r2Source, rate }) : null;
+      if (!resp || resp.status === 404) {
+        const filesB64 = {};
+        stems.forEach(stem => { filesB64[stem] = arrayBufferToBase64(pristineBytes[stem]); });
+        resp = await postSpeed({ files: filesB64, rate });
+      }
       if (!resp.ok) throw new Error(await resp.text());
       const { files } = await resp.json();
       const fraction = duration ? startOffset / duration : 0;
@@ -2822,7 +2836,7 @@ async function openResult(jobId, item = null, pushUrl = true) {
       }
       await showKaraokePlayer(data.files, chosenCandidate, artist, title, true);
     } else {
-      await showResults(data.files, true);
+      await showResults(data.files, true, jobId);
       shareUrlEl.value = `${location.origin}/result/${jobId}`;
       shareRow.classList.remove('hidden');
     }

@@ -610,34 +610,68 @@ def fastapi_app():
         _run_cmd(["ffmpeg", "-loglevel", "error", "-y", "-i", wav_out, "-c:a", "flac", flac_out])
         return flac_out
 
+    _SPEED_SOURCE_RE = re.compile(r"^(tmp|results)/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+    _SPEED_FILE_RE = re.compile(r"^(?!\.)[^/\\]+\.(mp3|flac)$")  # a bare filename within that job
+
     @web.post("/api/speed")
     async def api_speed(request: Request):
+        """Re-render every stem at a new speed, pitch unchanged — see app.py's api_speed for
+        the two request shapes (stems read from R2, or uploaded as base64)."""
+        from botocore.exceptions import ClientError
+
         data = await request.json()
-        files = data.get("files") or {}
         try:
             rate = float(data.get("rate"))
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="rate must be a number")
-        if not files or not (0.1 <= rate <= 2.0):
-            raise HTTPException(status_code=400, detail="Invalid files or rate (must be 0.1-2.0)")
+        if not (0.1 <= rate <= 2.0):
+            raise HTTPException(status_code=400, detail="rate must be 0.1-2.0")
 
-        loop = asyncio.get_event_loop()
+        source = data.get("source")
+        if source:
+            prefix, names = source.get("prefix") or "", source.get("files") or {}
+            if not _r2_configured():
+                raise HTTPException(status_code=400, detail="R2 is not configured")
+            if not (_SPEED_SOURCE_RE.match(prefix) and names
+                    and all(isinstance(n, str) and _SPEED_FILE_RE.match(n) for n in names.values())):
+                raise HTTPException(status_code=400, detail="Invalid source")
+            inputs = {stem: ("r2", f"{prefix}/{name}") for stem, name in names.items()}
+        else:
+            files = data.get("files") or {}
+            if not files:
+                raise HTTPException(status_code=400, detail="No stems given")
+            inputs = {stem: ("b64", b64) for stem, b64 in files.items()}
 
-        def process_one(b64: str) -> str:
+        r2 = _get_r2() if source else None  # boto3 clients are thread-safe
+        bucket = os.environ.get("R2_BUCKET_NAME")
+
+        def process_one(stem: str, kind: str, ref: str) -> str:
             with tempfile.TemporaryDirectory() as workdir:
                 src = os.path.join(workdir, "src")
-                with open(src, "wb") as fh:
-                    fh.write(base64.b64decode(b64))
+                if kind == "r2":
+                    try:
+                        r2.download_file(bucket, ref, src)
+                    except ClientError as e:
+                        if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
+                            raise FileNotFoundError(ref)
+                        raise
+                else:
+                    with open(src, "wb") as fh:
+                        fh.write(base64.b64decode(ref))
                 with open(_stretch_stem(src, rate, workdir), "rb") as fh:
                     return base64.b64encode(fh.read()).decode()
 
-        async def run_one(fname, b64):
-            try:
-                return fname, await loop.run_in_executor(None, process_one, b64)
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Speed change failed on {fname}: {e}")
+        loop = asyncio.get_running_loop()
 
-        results = await asyncio.gather(*(run_one(f, b) for f, b in files.items()))
+        async def run_one(stem, kind, ref):
+            try:
+                return stem, await loop.run_in_executor(None, process_one, stem, kind, ref)
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail=f"Stem {stem} is no longer in storage")
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Speed change failed on {stem}: {e}")
+
+        results = await asyncio.gather(*(run_one(s, k, r) for s, (k, r) in inputs.items()))
         return {"files": dict(results)}
 
     @web.get("/api/result/{job_id}")

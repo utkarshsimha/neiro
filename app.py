@@ -261,43 +261,87 @@ def _stretch_stem(src_path: str, rate: float, workdir: str) -> str:
     return flac_out
 
 
+# Where /api/speed may read stems from in R2: a staged (tmp/) or saved (results/) job.
+_SPEED_SOURCE_RE = re.compile(r"^(tmp|results)/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+_SPEED_FILE_RE = re.compile(r"^(?!\.)[^/\\]+\.(mp3|flac)$")  # a bare filename within that job
+
+
 @app.post("/api/speed")
 async def api_speed(request: Request):
     """Re-render every stem at a new playback speed with pitch unchanged.
 
-    Runs while paused (see static/index.html's applySpeed): the client always
-    resends the pristine, unstretched stem bytes plus the target absolute rate,
-    so repeated speed changes never compound re-stretches of an already-stretched
-    buffer. Each stem is processed concurrently (rubberband runs as a subprocess,
-    so this parallelizes across stems despite the GIL) to keep total latency close
-    to a single stem's processing time rather than their sum.
+    Runs while paused (see static/index.html's applySpeed), always from the pristine
+    (rate=1) stems at the target absolute rate, so repeated speed changes never compound
+    re-stretches of an already-stretched buffer. Two request shapes:
+
+      {rate, source: {prefix: "tmp/<job_id>" | "results/<job_id>", files: {stem: filename}}}
+          The stems are already in R2 (staged or saved), so the server reads them from
+          there and the browser uploads nothing. 404 if they're gone (e.g. tmp/ expired);
+          the client then falls back to uploading.
+      {rate, files: {stem: base64}}
+          Fallback when the result isn't in R2.
+
+    The stretched FLACs come back inline as base64. Profiling showed the base64 upload
+    dominating on long tracks (~250 MB for 21 minutes).
+    Each stem is processed concurrently (the heavy lifting is in ffmpeg/rubberband
+    subprocesses, so this parallelizes despite the GIL) to keep total latency close to a
+    single stem's processing time rather than their sum.
     """
+    from botocore.exceptions import ClientError
+
     data = await request.json()
-    files = data.get("files") or {}
     try:
         rate = float(data.get("rate"))
     except (TypeError, ValueError):
         raise HTTPException(400, "rate must be a number")
-    if not files or not (0.1 <= rate <= 2.0):
-        raise HTTPException(400, "Invalid files or rate (must be 0.1-2.0)")
+    if not (0.1 <= rate <= 2.0):
+        raise HTTPException(400, "rate must be 0.1-2.0")
 
-    loop = asyncio.get_event_loop()
+    source = data.get("source")
+    if source:
+        prefix, names = source.get("prefix") or "", source.get("files") or {}
+        if not _r2_configured():
+            raise HTTPException(400, "R2 is not configured")
+        if not (_SPEED_SOURCE_RE.match(prefix) and names
+                and all(isinstance(n, str) and _SPEED_FILE_RE.match(n) for n in names.values())):
+            raise HTTPException(400, "Invalid source")
+        inputs = {stem: ("r2", f"{prefix}/{name}") for stem, name in names.items()}
+    else:
+        files = data.get("files") or {}
+        if not files:
+            raise HTTPException(400, "No stems given")
+        inputs = {stem: ("b64", b64) for stem, b64 in files.items()}
 
-    def process_one(b64: str) -> str:
+    r2 = _get_r2() if source else None  # boto3 clients are thread-safe
+    bucket = os.environ.get("R2_BUCKET_NAME")
+
+    def process_one(stem: str, kind: str, ref: str) -> str:
         with tempfile.TemporaryDirectory() as workdir:
             src = os.path.join(workdir, "src")
-            with open(src, "wb") as fh:
-                fh.write(base64.b64decode(b64))
+            if kind == "r2":
+                try:
+                    r2.download_file(bucket, ref, src)
+                except ClientError as e:
+                    if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
+                        raise FileNotFoundError(ref)
+                    raise
+            else:
+                with open(src, "wb") as fh:
+                    fh.write(base64.b64decode(ref))
             with open(_stretch_stem(src, rate, workdir), "rb") as fh:
                 return base64.b64encode(fh.read()).decode()
 
-    async def run_one(fname, b64):
-        try:
-            return fname, await loop.run_in_executor(None, process_one, b64)
-        except Exception as e:
-            raise HTTPException(500, f"Speed change failed on {fname}: {e}")
+    loop = asyncio.get_running_loop()
 
-    results = await asyncio.gather(*(run_one(f, b) for f, b in files.items()))
+    async def run_one(stem, kind, ref):
+        try:
+            return stem, await loop.run_in_executor(None, process_one, stem, kind, ref)
+        except FileNotFoundError:
+            raise HTTPException(404, f"Stem {stem} is no longer in storage")
+        except Exception as e:
+            raise HTTPException(500, f"Speed change failed on {stem}: {e}")
+
+    results = await asyncio.gather(*(run_one(s, k, r) for s, (k, r) in inputs.items()))
     return {"files": dict(results)}
 
 
