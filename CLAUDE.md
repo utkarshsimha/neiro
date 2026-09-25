@@ -106,6 +106,12 @@ directly in a background thread.
    ~530 MB down) and Python-side MP3 decoding as large costs next to the stretch itself;
    MP3 output was benchmarked and rejected (encoding costs more than the smaller download
    saves). Stems are processed concurrently to stay under Modal's 150s web endpoint timeout.
+   On Modal, R2-backed requests are handed to a separate `stretch_stems` function (32 CPUs,
+   short scaledown window since idle reserved cores are billed) that splits each stem into
+   30s chunks stretched in parallel and rejoined with a correlation-normalised crossfade
+   (`_stretch_wav_chunked`), working in `/dev/shm` because the container filesystem was the
+   bottleneck for the many chunk files. The web container itself only gets ~5-6 cores in
+   practice, so chunking there doesn't help.
    Rubber Band was chosen after an earlier real-time AudioWorklet approach (SoundTouchJS)
    produced audible quality degradation on polyphonic stems — see git history — and
    offline batch processing has no such real-time-DSP quality ceiling.

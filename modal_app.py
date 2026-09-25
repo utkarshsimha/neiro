@@ -163,6 +163,189 @@ def _optional_secret(name: str) -> modal.Secret:
     return secret
 
 
+# ── Speed-change helpers (shared by the web endpoint and stretch_stems) ────
+
+def _get_r2():
+    import boto3
+    from botocore.config import Config
+
+    return boto3.client(
+        "s3",
+        endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+        aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+        region_name="auto",
+        config=Config(s3={"addressing_style": "path"}),
+    )
+
+
+def _run_cmd(cmd: list) -> None:
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"{cmd[0]} failed: {proc.stderr.strip()[-500:]}")
+
+
+def _stretch_wav_chunked(wav_in: str, wav_out: str, rate: float, workdir: str, pool,
+                         chunk_s: float, pad_s: float = 2.0, xfade_s: float = 0.05) -> None:
+    """Rubber Band over time chunks in parallel, rejoined with short crossfades.
+
+    One rubberband process per stem is single-stream (~41s for a 21-minute stem on Modal),
+    so this cuts the stem into `chunk_s` pieces and stretches each in its own process (on
+    `pool`, shared across stems) with `pad_s` of extra context on both sides, so Rubber
+    Band's start-up/tail behaviour falls outside the part that's kept. Each piece's kept
+    region is then crossfaded into its neighbours over `xfade_s`, centred on the boundary.
+    Boundaries depend only on the input length, so every stem of a track is cut at the
+    same places and stays in sync. Streams to `wav_out` rather than holding the whole stem
+    in memory (a 21-minute stereo stem is ~450 MB as float32).
+
+    Output isn't bit-identical to a single pass — Rubber Band's phase state depends on
+    everything it has processed, so a chunk starting fresh renders the same audio with
+    different phases — but on a click-train test every transient landed at the same time
+    as in a single pass, and blind listening at the seams couldn't tell them apart."""
+    import numpy as np
+    import soundfile as sf
+
+    info = sf.info(wav_in)
+    n, sr = info.frames, info.samplerate
+    chunk, pad = int(chunk_s * sr), int(pad_s * sr)
+    bounds = list(range(0, n, chunk)) + [n]
+    if len(bounds) > 2 and bounds[-1] - bounds[-2] < chunk // 2:
+        del bounds[-2]  # fold a short tail into the previous chunk
+    n_chunks = len(bounds) - 1
+    if n_chunks == 1:
+        _run_cmd(["rubberband", "-q", "--tempo", str(rate), wav_in, wav_out])
+        return
+
+    def stretch_chunk(k: int) -> tuple:
+        e0, e1 = max(0, bounds[k] - pad), min(n, bounds[k + 1] + pad)
+        src, dst = (os.path.join(workdir, f"chunk{k}_{s}.wav") for s in ("in", "out"))
+        sf.write(src, sf.read(wav_in, start=e0, stop=e1, dtype="int16")[0], sr, subtype="PCM_16")
+        _run_cmd(["rubberband", "-q", "--tempo", str(rate), src, dst])
+        os.remove(src)
+        return e0, dst
+
+    n_out = round(n / rate)
+    xf = max(2, int(xfade_s * sr))
+    half = xf // 2
+    fade_in = (0.5 - 0.5 * np.cos(np.linspace(0, np.pi, xf, dtype=np.float32)))[:, None]
+    fade_out = fade_in[::-1]  # fade_in + fade_out == 1 across the crossfade
+
+    def crossfade(tail, head):
+        """Crossfade the two chunks' renderings of the same overlap, level-matched.
+
+        Adjacent chunks render the overlap with different phases, so a plain crossfade
+        partly cancels and dips — ~3 dB mid-fade when uncorrelated — while an equal-power
+        one overshoots when they're partly correlated (measured ~50% on sustained tones).
+        Normalising by the measured correlation `rho` keeps the summed level flat either
+        way: this reduces to a plain crossfade at rho=1 and to equal-power at rho=0.
+        Measured against a single pass, seams came out within the same level variation as
+        mid-chunk audio."""
+        rho = float(np.sum(tail * head) / (np.sqrt(np.sum(tail**2) * np.sum(head**2)) + 1e-12))
+        rho = min(max(rho, 0.0), 1.0)  # anti-correlated overlaps would need a big, risky boost
+        norm = np.sqrt(fade_in**2 + fade_out**2 + 2 * fade_in * fade_out * rho)
+        return (tail * fade_out + head * fade_in) / norm
+
+    carry = None  # previous chunk's overlap (unfaded), waiting to be crossfaded with this one
+    with sf.SoundFile(wav_out, "w", sr, info.channels, subtype="PCM_16") as out:
+        # pool.map yields in order, so assembly proceeds while later chunks still stretch.
+        for k, (e0, dst) in enumerate(pool.map(stretch_chunk, range(n_chunks))):
+            piece = sf.read(dst, dtype="float32", always_2d=True)[0]
+            os.remove(dst)
+            # This chunk's span in the output: its own region, plus half a crossfade either side.
+            s = 0 if k == 0 else round(bounds[k] / rate) - half
+            e = n_out if k == n_chunks - 1 else round(bounds[k + 1] / rate) - half + xf
+            local = s - round(e0 / rate)  # where output sample `s` falls within this piece
+            seg = piece[local:local + (e - s)]
+            if len(seg) < e - s:  # rubberband's output length can be off by a few samples
+                seg = np.pad(seg, ((0, e - s - len(seg)), (0, 0)))
+            if k > 0:
+                seg[:xf] = crossfade(carry, seg[:xf])
+            if k < n_chunks - 1:
+                carry = seg[-xf:].copy()
+                seg = seg[:-xf]
+            out.write(np.clip(seg, -1.0, 1.0))
+
+
+def _stretch_stem(src_path: str, rate: float, workdir: str, pool=None, chunk_s=None) -> str:
+    """Pitch-preserving time-stretch via Rubber Band on files, with ffmpeg decoding
+    before and encoding FLAC after — see app.py's _stretch_stem for why. With `chunk_s`
+    (and a thread `pool`) the stretch is split into parallel chunks — see
+    _stretch_wav_chunked."""
+    wav_in = os.path.join(workdir, "in.wav")
+    wav_out = os.path.join(workdir, "stretched.wav")
+    flac_out = os.path.join(workdir, "out.flac")
+    _run_cmd(["ffmpeg", "-loglevel", "error", "-y", "-i", src_path, "-c:a", "pcm_s16le", wav_in])
+    if rate == 1.0:
+        wav_out = wav_in  # like pyrubberband, don't run a no-op stretch
+    elif chunk_s:
+        _stretch_wav_chunked(wav_in, wav_out, rate, workdir, pool, chunk_s)
+    else:
+        _run_cmd(["rubberband", "-q", "--tempo", str(rate), wav_in, wav_out])
+    _run_cmd(["ffmpeg", "-loglevel", "error", "-y", "-i", wav_out, "-c:a", "flac", flac_out])
+    return flac_out
+
+
+# ── Speed-change stretching on a big CPU box ────────────────────────────────
+
+STRETCH_CPUS = 32
+
+
+@app.function(
+    image=web_image,
+    cpu=STRETCH_CPUS,
+    # Also sizes /dev/shm, where the stretch works (see below): ~1 GB per 21-minute stem.
+    memory=16384,
+    timeout=300,
+    # Idle containers are billed at their full reservation, and 32 idle cores cost more
+    # per minute than a whole 21-minute speed change's actual work (~300 core-seconds),
+    # so shut down quickly; the price is a cold start (a few seconds) on the next change.
+    scaledown_window=10,
+    secrets=[_optional_secret("cloudflare-r2")],
+)
+def stretch_stems(keys: dict, rate: float, chunk_s: float, out_prefix: str) -> dict:
+    """Stretch every stem of a track (read from R2 at `keys` {stem: key}) to `rate`, write
+    the FLACs under `out_prefix/` and return {stem: presigned url}.
+
+    Runs apart from the web container because the stretch is CPU-bound and the web
+    container only gets ~5-6 cores in practice: profiling a 21-minute, 6-stem track showed
+    ~300 core-seconds of Rubber Band work taking ~57s there even when split into chunks.
+    Here every stem's chunks share one pool sized to this function's reservation.
+
+    All the working files live in /dev/shm (RAM): chunking does a lot of small file
+    writes/reads (~6 GB of chunk WAVs for six 21-minute stems), and Modal's sandboxed
+    container filesystem made that the bottleneck — benchmarked at 32 cores, six stems
+    took 41s with the work in /tmp vs 15s in /dev/shm."""
+    import tempfile
+    from concurrent.futures import ThreadPoolExecutor
+
+    from botocore.exceptions import ClientError
+
+    r2, bucket = _get_r2(), os.environ["R2_BUCKET_NAME"]
+    chunk_pool = ThreadPoolExecutor(max_workers=STRETCH_CPUS)
+
+    def process_one(item):
+        stem, key = item
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as workdir:
+            src = os.path.join(workdir, "src")
+            try:
+                r2.download_file(bucket, key, src)
+            except ClientError as e:
+                if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
+                    raise FileNotFoundError(key)  # re-raised in the caller → HTTP 404
+                raise
+            out_path = _stretch_stem(src, rate, workdir, chunk_pool, chunk_s)
+            out_key = f"{out_prefix}/{stem}.flac"
+            r2.upload_file(out_path, bucket, out_key, ExtraArgs={"ContentType": "audio/flac"})
+            return stem, r2.generate_presigned_url(
+                "get_object", Params={"Bucket": bucket, "Key": out_key}, ExpiresIn=86400)
+
+    try:
+        with ThreadPoolExecutor(max_workers=len(keys)) as stems_pool:
+            return dict(stems_pool.map(process_one, keys.items()))
+    finally:
+        chunk_pool.shutdown(cancel_futures=True)
+
+
 @app.function(
     image=web_image,
     timeout=3600,
@@ -179,24 +362,12 @@ def fastapi_app():
     import re
     import uuid
 
-    import boto3
-    from botocore.config import Config
     from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
     from fastapi.responses import FileResponse, Response, StreamingResponse
     from fastapi.staticfiles import StaticFiles
 
     web = FastAPI(title="Neiro")
     web.mount("/static", StaticFiles(directory="/app/static"), name="static")
-
-    def _get_r2():
-        return boto3.client(
-            "s3",
-            endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
-            aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
-            aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
-            region_name="auto",
-            config=Config(s3={"addressing_style": "path"}),
-        )
 
     def _r2_configured() -> bool:
         return all(os.environ.get(k) for k in
@@ -568,25 +739,6 @@ def fastapi_app():
         return Response(content=data, media_type=ct,
                         headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600"})
 
-    def _run_cmd(cmd: list) -> None:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise RuntimeError(f"{cmd[0]} failed: {proc.stderr.strip()[-500:]}")
-
-    def _stretch_stem(src_path: str, rate: float, workdir: str) -> str:
-        """Pitch-preserving time-stretch via Rubber Band on files, with ffmpeg decoding
-        before and encoding FLAC after — see app.py's _stretch_stem for why."""
-        wav_in = os.path.join(workdir, "in.wav")
-        wav_out = os.path.join(workdir, "stretched.wav")
-        flac_out = os.path.join(workdir, "out.flac")
-        _run_cmd(["ffmpeg", "-loglevel", "error", "-y", "-i", src_path, "-c:a", "pcm_s16le", wav_in])
-        if rate == 1.0:
-            wav_out = wav_in  # like pyrubberband, don't run a no-op stretch
-        else:
-            _run_cmd(["rubberband", "-q", "--tempo", str(rate), wav_in, wav_out])
-        _run_cmd(["ffmpeg", "-loglevel", "error", "-y", "-i", wav_out, "-c:a", "flac", flac_out])
-        return flac_out
-
     _SPEED_SOURCE_RE = re.compile(r"^(tmp|results)/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
     _SPEED_FILE_RE = re.compile(r"^(?!\.)[^/\\]+\.(mp3|flac)$")  # a bare filename within that job
 
@@ -620,9 +772,22 @@ def fastapi_app():
             inputs = {stem: ("b64", b64) for stem, b64 in files.items()}
 
         deliver_via_r2 = _r2_configured()
+        out_id = str(uuid.uuid4())
+
+        if source:
+            # Stems in R2 → stretch them in 30s chunks on the big-CPU stretch_stems
+            # function rather than in this container (see its docstring for why).
+            keys = {stem: ref for stem, (_, ref) in inputs.items()}
+            try:
+                urls = await stretch_stems.remote.aio(keys, rate, 30.0, f"{_STAGED_PREFIX}/{out_id}")
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail="A stem is no longer in storage")
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Speed change failed: {e}")
+            return {"delivery": "url", "files": urls}
+
         r2 = _get_r2() if deliver_via_r2 else None  # boto3 clients are thread-safe
         bucket = os.environ.get("R2_BUCKET_NAME")
-        out_id = str(uuid.uuid4())
 
         def process_one(stem: str, kind: str, ref: str) -> str:
             with tempfile.TemporaryDirectory() as workdir:
