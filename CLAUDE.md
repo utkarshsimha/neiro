@@ -41,31 +41,41 @@ slow), `--BigShifts N` (shift-average passes, 1=off/3–11=typical), `--output_f
 
 ## Architecture
 
-### Two parallel FastAPI apps, one shared contract
+### One web app, two deployments
 
-`app.py` (local) and the `fastapi_app` closure inside `modal_app.py` (Modal) each define the
-same API surface's **route handlers** (`/`, `/api/separate`, `/api/youtube`, `/api/share/save`,
-`/api/library`, `/api/result/{job_id}`, `/api/audio-proxy`, `/api/speed`) — when changing
-request/response shapes or endpoint behavior, **update both files**. Everything else they have
-in common lives in `neiro_common.py`, which both import: `DEFAULTS`, separation output
-handling (`finalize_outputs`), SSE streaming (`queue_to_sse`), YouTube/Cobalt ingestion, the
-R2 helpers (client, staging, save/library/manifest) and the speed-change helpers — put new
-shared logic there rather than copying it. Keep that module's top-level imports stdlib-only —
+Every route (`/`, `/api/separate`, `/api/youtube`, `/api/share/save`, `/api/library`,
+`/api/result/{job_id}`, `/api/audio-proxy`, `/api/speed`) is defined once, in
+`neiro_web.build_app()`. `app.py` (local dev server) and `modal_app.py`'s `fastapi_app`
+(Modal) each just call it, passing in the few things that genuinely differ:
+
+- `static_dir` — `static` locally, `/app/static` in the Modal web image.
+- `gpu_separate` — the Modal `separate` generator. Modal passes `separate.remote_gen.aio`;
+  `app.py` passes a wrapper that imports `modal_app` lazily, so the local server starts (and
+  CPU mode works) without Modal set up.
+- `cpu_separate` — local only (`app.py`'s `_cpu_separate`, which runs `inference.py`
+  in-process). Without it, as on Modal, `cpu: true` requests run on the GPU.
+- `remote_stretch` — Modal only: hands R2-backed speed changes to `stretch_stems`. Without
+  it, as locally, speed changes run in-process.
+
+The non-route logic lives in `neiro_common.py`: `DEFAULTS`, separation output handling
+(`finalize_outputs`), SSE streaming (`queue_to_sse`), YouTube/Cobalt ingestion, the R2 helpers
+(client, staging, save/library/manifest) and the speed-change helpers.
+
+Import constraints: `neiro_common.py` must keep its top-level imports stdlib-only, because
 `modal_app.py` imports it at the top, so it loads in every Modal container including the GPU
-one — and remember `modal_app.py`'s images only see it via
-`add_local_python_source("neiro_common")`. `app.py`'s Modal GPU path calls into `modal_app.py`'s
-`separate` function via `ma.separate.remote_gen.aio(...)`; its CPU path calls `inference.py`
-directly in a background thread.
+one. `neiro_web.py` imports FastAPI, so `modal_app.py` imports it only inside `fastapi_app`,
+and only the web image includes it. Both reach the Modal images only via
+`add_local_python_source(...)` — a new shared module needs adding there too.
 
 ### Request flow
 
 1. Client uploads audio (or a YouTube URL, downloaded server-side via `yt-dlp` into an mp3) to
    `POST /api/separate` with a JSON `options` blob merged onto `DEFAULTS`.
-2. **CPU path** (`app.py`, `cpu: true`): runs `inference.predict_with_model` in a background
-   thread; `print` and `tqdm` are monkey-patched to push `{type: log|progress}` messages onto an
-   `asyncio.Queue`, drained as SSE.
-3. **GPU path**: `app.py` proxies to the Modal `separate` function (an `@app.function(gpu="H100")`
-   generator); `modal_app.py`'s own `fastapi_app` does the equivalent locally when deployed. The
+2. **CPU path** (local server only, `cpu: true`): `app.py`'s `_cpu_separate` runs
+   `inference.predict_with_model` in a background thread; `print` and `tqdm` are monkey-patched
+   to push `{type: log|progress}` messages onto an `asyncio.Queue`, drained as SSE.
+3. **GPU path** (everything else): the web app streams from the Modal `separate` function (an
+   `@app.function(gpu="H100")` generator) — whether it's running locally or on Modal. The
    generator yields `log`/`progress`/`result`/`error` dict messages; results are FLAC-encoded and
    base64'd, then re-encoded to MP3 for browser playback.
 4. Model checkpoints live on a Modal `Volume` (`mvsep-models`) so they persist across container
