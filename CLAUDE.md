@@ -138,7 +138,9 @@ and only the web image includes it. Both reach the Modal images only via
    abort and retry when a 5s window brings under 10% of the median recent download rate
    (floor 16 KB/s) — connections occasionally stall or trickle for 25s+. 1.0x is decoded
    locally from the pristine bytes. On Modal, R2-backed requests run on a separate `stretch_stems` generator
-   function (32 CPUs, short scaledown window since idle reserved cores are billed), working
+   function (12 CPUs reserved — what the playhead's first segment needs, 2 chunks × 6
+   stems — bursting to 32; a fixed 32 was no faster to first playback and cost ~2x, since
+   reserved cores are billed while idle — and 8 GB), working
    in `/dev/shm` because the container filesystem was the bottleneck for the many chunk
    files; the web container only gets ~5-6 cores in practice.
    Rubber Band was chosen after an earlier real-time AudioWorklet approach (SoundTouchJS)

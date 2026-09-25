@@ -170,7 +170,16 @@ def _optional_secret(name: str) -> modal.Secret:
 
 # ── Speed-change stretching on a big CPU box ────────────────────────────────
 
-STRETCH_CPUS = 32
+# Reserve 12 cores but let the container burst to 32 (Modal bills max(reserved, used)).
+# 12 is what the playhead's segment needs: two chunks of each of six stems, stretched at
+# once. Benchmarked on six 21-minute stems, that got the first segment ready as fast as a
+# fixed 32-core reservation (~1.6s after decoding) at about half the cost (~$0.006 vs
+# ~$0.012+ per speed change): 32 reserved cores are billed from start-up through the idle
+# window, but the actual work is only ~300 core-seconds, and bursting (~15 cores on
+# average) finishes the rest far faster than real time. 8 reserved was ~0.5s slower to the
+# first segment. Running the non-urgent chunks under `nice` made no measurable difference.
+STRETCH_CPUS = (12, 32)
+STRETCH_POOL = STRETCH_CPUS[1]  # threads for chunk work: enough to use the whole burst
 
 # Cancellation flags for in-flight stretch_stems calls, keyed by out_prefix (unique per
 # request). Closing a `remote_gen` stream doesn't stop the remote call, and FunctionCall
@@ -183,12 +192,13 @@ stretch_cancels = modal.Dict.from_name("neiro-stretch-cancels", create_if_missin
 @app.function(
     image=web_image,
     cpu=STRETCH_CPUS,
-    # Also sizes /dev/shm, where the stretch works (see below): ~1 GB per 21-minute stem.
-    memory=16384,
+    # The stretch's working files live in /dev/shm (see below), which counts as memory:
+    # it peaked at ~3.3 GB for six 21-minute stems (sources, decoded WAVs, chunk files in
+    # flight). A request, not a hard cap — usage above it is billed, not killed.
+    memory=8192,
     timeout=300,
-    # Idle containers are billed at their full reservation, and 32 idle cores cost more
-    # per minute than a whole 21-minute speed change's actual work (~300 core-seconds),
-    # so shut down quickly; the price is a cold start (a few seconds) on the next change.
+    # Idle containers are billed at their reservation, so don't linger long; the price is
+    # a cold start (a few seconds) on a speed change that comes after this.
     scaledown_window=10,
     secrets=[_optional_secret("cloudflare-r2")],
 )
@@ -200,7 +210,7 @@ def stretch_stems(keys: dict, rate: float, chunk_s: float, out_prefix: str, star
     Runs apart from the web container because the stretch is CPU-bound and the web
     container only gets ~5-6 cores in practice: profiling a 21-minute, 6-stem track showed
     ~300 core-seconds of Rubber Band work taking ~57s there even when split into chunks.
-    Here every stem's chunks share one pool sized to this function's reservation.
+    Here every stem's chunks share one pool sized to this function's burst limit.
 
     All the working files live in /dev/shm (RAM): chunking does a lot of small file
     writes/reads (~6 GB of chunk WAVs for six 21-minute stems), and Modal's sandboxed
@@ -228,7 +238,7 @@ def stretch_stems(keys: dict, rate: float, chunk_s: float, out_prefix: str, star
 
     threading.Thread(target=watch_for_cancel, daemon=True).start()
     inputs = {stem: ("r2", key) for stem, key in keys.items()}
-    pool = ThreadPoolExecutor(max_workers=STRETCH_CPUS)
+    pool = ThreadPoolExecutor(max_workers=STRETCH_POOL)
     try:
         with tempfile.TemporaryDirectory(dir="/dev/shm") as workdir:
             # A missing stem raises FileNotFoundError here, which Modal re-raises in the
