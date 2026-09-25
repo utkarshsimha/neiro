@@ -18,7 +18,7 @@ import threading
 
 import modal
 
-from neiro_common import get_r2, stretch_stem
+from neiro_common import r2_segment_deliverer, run_speed_stream
 
 app = modal.App("neiro")
 
@@ -172,6 +172,13 @@ def _optional_secret(name: str) -> modal.Secret:
 
 STRETCH_CPUS = 32
 
+# Cancellation flags for in-flight stretch_stems calls, keyed by out_prefix (unique per
+# request). Closing a `remote_gen` stream doesn't stop the remote call, and FunctionCall
+# .cancel() can't look up `remote_gen` calls (only spawned ones, and generators can't be
+# spawned) — so when the browser drops a speed-change stream (e.g. it changed speed again),
+# the web tier sets a flag here that stretch_stems polls.
+stretch_cancels = modal.Dict.from_name("neiro-stretch-cancels", create_if_missing=True)
+
 
 @app.function(
     image=web_image,
@@ -185,9 +192,10 @@ STRETCH_CPUS = 32
     scaledown_window=10,
     secrets=[_optional_secret("cloudflare-r2")],
 )
-def stretch_stems(keys: dict, rate: float, chunk_s: float, out_prefix: str) -> dict:
-    """Stretch every stem of a track (read from R2 at `keys` {stem: key}) to `rate`, write
-    the FLACs under `out_prefix/` and return {stem: presigned url}.
+def stretch_stems(keys: dict, rate: float, chunk_s: float, out_prefix: str, start_fraction: float = 0.0):
+    """Generator: stretch every stem of a track (read from R2 at `keys` {stem: key}) to
+    `rate`, yielding neiro_common.stream_stretch's events as segments land in R2 under
+    `out_prefix/` — the web tier relays them to the browser as they come (see /api/speed).
 
     Runs apart from the web container because the stretch is CPU-bound and the web
     container only gets ~5-6 cores in practice: profiling a 21-minute, 6-stem track showed
@@ -197,36 +205,50 @@ def stretch_stems(keys: dict, rate: float, chunk_s: float, out_prefix: str) -> d
     All the working files live in /dev/shm (RAM): chunking does a lot of small file
     writes/reads (~6 GB of chunk WAVs for six 21-minute stems), and Modal's sandboxed
     container filesystem made that the bottleneck — benchmarked at 32 cores, six stems
-    took 41s with the work in /tmp vs 15s in /dev/shm."""
+    took 41s with the work in /tmp vs 15s in /dev/shm.
+
+    Stops early — cancelling the chunk work that hasn't started — once the caller sets
+    this request's flag in `stretch_cancels`; a watcher thread checks it every 0.5s."""
     import tempfile
+    import threading
+    import time
     from concurrent.futures import ThreadPoolExecutor
 
-    from botocore.exceptions import ClientError
+    cancelled, finished = threading.Event(), threading.Event()
 
-    r2, bucket = get_r2(), os.environ["R2_BUCKET_NAME"]
-    chunk_pool = ThreadPoolExecutor(max_workers=STRETCH_CPUS)
-
-    def process_one(item):
-        stem, key = item
-        with tempfile.TemporaryDirectory(dir="/dev/shm") as workdir:
-            src = os.path.join(workdir, "src")
+    def watch_for_cancel():
+        while not finished.is_set():
             try:
-                r2.download_file(bucket, key, src)
-            except ClientError as e:
-                if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
-                    raise FileNotFoundError(key)  # re-raised in the caller → HTTP 404
-                raise
-            out_path = stretch_stem(src, rate, workdir, chunk_pool, chunk_s)
-            out_key = f"{out_prefix}/{stem}.flac"
-            r2.upload_file(out_path, bucket, out_key, ExtraArgs={"ContentType": "audio/flac"})
-            return stem, r2.generate_presigned_url(
-                "get_object", Params={"Bucket": bucket, "Key": out_key}, ExpiresIn=86400)
+                if stretch_cancels.get(out_prefix):
+                    cancelled.set()
+                    return
+            except Exception:
+                pass  # a flaky lookup just means checking again shortly
+            time.sleep(0.5)
 
+    threading.Thread(target=watch_for_cancel, daemon=True).start()
+    inputs = {stem: ("r2", key) for stem, key in keys.items()}
+    pool = ThreadPoolExecutor(max_workers=STRETCH_CPUS)
     try:
-        with ThreadPoolExecutor(max_workers=len(keys)) as stems_pool:
-            return dict(stems_pool.map(process_one, keys.items()))
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as workdir:
+            # A missing stem raises FileNotFoundError here, which Modal re-raises in the
+            # caller before any event — /api/speed turns that into a 404.
+            events = run_speed_stream(inputs, rate, workdir, pool, r2_segment_deliverer(out_prefix),
+                                      chunk_s, start_fraction)
+            try:
+                for ev in events:
+                    if cancelled.is_set():
+                        break
+                    yield ev
+            finally:
+                events.close()  # cancels stream_stretch's pending chunk work
     finally:
-        chunk_pool.shutdown(cancel_futures=True)
+        finished.set()
+        pool.shutdown(wait=False, cancel_futures=True)
+        try:
+            stretch_cancels.pop(out_prefix, None)
+        except Exception:
+            pass
 
 
 @app.function(
@@ -242,10 +264,21 @@ def fastapi_app():
     # (the GPU container imports this module too).
     from neiro_web import build_app
 
-    async def remote_stretch(keys: dict, rate: float, out_prefix: str) -> dict:
-        # R2-backed speed changes run in 30s chunks on the big-CPU stretch_stems function
-        # rather than in this container (see its docstring for why).
-        return await stretch_stems.remote.aio(keys, rate, 30.0, out_prefix)
+    async def remote_stretch(keys: dict, rate: float, out_prefix: str, chunk_s: float, start_fraction: float):
+        # R2-backed speed changes run on the big-CPU stretch_stems function rather than in
+        # this container (see its docstring for why); its events stream back as they happen.
+        # If we're closed before the end (the browser dropped the stream), tell it to stop.
+        import asyncio
+
+        try:
+            async for ev in stretch_stems.remote_gen.aio(keys, rate, chunk_s, out_prefix, start_fraction):
+                yield ev
+        except (GeneratorExit, asyncio.CancelledError):
+            try:
+                await stretch_cancels.put.aio(out_prefix, True)
+            except Exception:
+                pass  # worst case the stretch runs to completion unobserved
+            raise
 
     return build_app(static_dir="/app/static", gpu_separate=separate.remote_gen.aio,
                      remote_stretch=remote_stretch)

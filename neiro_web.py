@@ -23,16 +23,17 @@ import re
 import tempfile
 import threading
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from neiro_common import (
-    DEFAULTS, INDEX_HEADERS, JOB_ID_RE, SPEED_FILE_RE, SPEED_SOURCE_RE, STAGED_PREFIX,
-    clean_yt_title, delete_job, download_yt, finalize_outputs, get_r2, list_library,
-    queue_to_sse, r2_configured, save_staged, stretch_stem, update_manifest, yt_url_ok,
+    DEFAULTS, INDEX_HEADERS, JOB_ID_RE, SPEED_FILE_RE, SPEED_SOURCE_RE, STAGED_PREFIX, STEM_NAME_RE,
+    clean_yt_title, delete_job, download_yt, finalize_outputs, get_r2, inline_segment_deliverer,
+    list_library, queue_to_sse, r2_configured, r2_segment_deliverer, run_speed_stream, save_staged,
+    update_manifest, yt_url_ok,
 )
 
 # (audio_bytes, options) -> async iterator of {type: log|progress|result|error} messages
@@ -40,8 +41,9 @@ GpuSeparate = Callable[[bytes, dict], AsyncIterator[dict]]
 # (audio_bytes, filename, options, put) -> output dir of FLAC stems; runs in a worker
 # thread and reports progress through the thread-safe `put(message)`.
 CpuSeparate = Callable[[bytes, str, dict, Callable[[dict], None]], str]
-# (keys {stem: R2 key}, rate, out_prefix) -> {stem: presigned url}
-RemoteStretch = Callable[[dict, float, str], Awaitable[dict]]
+# (keys {stem: R2 key}, rate, out_prefix, chunk_s, start_fraction) -> async iterator of
+# neiro_common.stream_stretch events (segments delivered as presigned R2 URLs)
+RemoteStretch = Callable[[dict, float, str, float, float], AsyncIterator[dict]]
 
 
 def _sse(q: asyncio.Queue) -> StreamingResponse:
@@ -237,38 +239,46 @@ def build_app(static_dir: str, gpu_separate: GpuSeparate, cpu_separate: CpuSepar
 
     @web.post("/api/speed")
     async def api_speed(request: Request):
-        """Re-render every stem at a new playback speed with pitch unchanged.
+        """Re-render every stem at a new playback speed with pitch unchanged, streamed.
 
         Runs while paused (see static/index.html's applySpeed), always from the pristine
         (rate=1) stems at the target absolute rate, so repeated speed changes never compound
         re-stretches of an already-stretched buffer. Two request shapes:
 
-          {rate, source: {prefix: "tmp/<job_id>" | "results/<job_id>", files: {stem: filename}}}
+          {rate, start_fraction?, source: {prefix: "tmp/<job_id>" | "results/<job_id>",
+                                           files: {stem: filename}}}
               The stems are already in R2 (staged or saved), so the server reads them from
               there and the browser uploads nothing. 404 if they're gone (e.g. tmp/ expired);
               the client then falls back to uploading.
-          {rate, files: {stem: base64}}
+          {rate, start_fraction?, files: {stem: base64}}
               Fallback when the result isn't in R2.
 
-        With R2 configured the stretched FLACs are written under tmp/<new id>/ (expired with
-        the rest of tmp/) and the response carries presigned URLs ({"delivery": "url"});
-        otherwise they come back inline as base64 ({"delivery": "base64"}). Profiling showed
-        base64 over JSON dominating on long tracks (~250 MB up, ~530 MB down for 21 minutes).
+        The response is an SSE stream of neiro_common.stream_stretch's events: a `meta`
+        with the new timeline, then one `segment` per stem × ~30s piece as each finishes —
+        playhead-first, starting from `start_fraction` of the way through — each with a
+        presigned R2 URL (under tmp/<new id>/, expired with the rest of tmp/) or, without
+        R2, inline base64; then `done`, or `error` if something fails partway. The browser
+        starts playing as soon as every stem's segment under the playhead has arrived
+        instead of waiting for whole files (~30s of stretch + ~15s of download and decode
+        for a 21-minute track). The first event is awaited before responding, so failures
+        up front (like a missing R2 stem) still get a proper HTTP status.
 
         R2-backed requests go to `remote_stretch` when there is one (Modal's stretch_stems —
-        see its docstring). Otherwise each stem is processed concurrently in-process (the
-        heavy lifting is in ffmpeg/rubberband subprocesses, so this parallelizes despite the
-        GIL) to keep total latency close to a single stem's processing time.
+        see its docstring); everything else is stretched in this process.
         """
-        from botocore.exceptions import ClientError
-
         data = await request.json()
         try:
             rate = float(data.get("rate"))
+            start_fraction = float(data.get("start_fraction") or 0.0)
         except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="rate must be a number")
+            raise HTTPException(status_code=400, detail="rate and start_fraction must be numbers")
         if not (0.1 <= rate <= 2.0):
             raise HTTPException(status_code=400, detail="rate must be 0.1-2.0")
+        if not (0.0 <= start_fraction <= 1.0):
+            raise HTTPException(status_code=400, detail="start_fraction must be 0-1")
+        # Chunk length for the parallel stretch, which is also the length of each streamed
+        # segment — see neiro_common.stream_stretch.
+        chunk_s = 30.0
 
         source = data.get("source")
         if source:
@@ -284,56 +294,78 @@ def build_app(static_dir: str, gpu_separate: GpuSeparate, cpu_separate: CpuSepar
             if not files:
                 raise HTTPException(status_code=400, detail="No stems given")
             inputs = {stem: ("b64", b64) for stem, b64 in files.items()}
+        if not all(STEM_NAME_RE.match(stem) for stem in inputs):
+            raise HTTPException(status_code=400, detail="Invalid stem name")
 
-        deliver_via_r2 = r2_configured()
-        out_id = str(uuid.uuid4())
-
+        out_prefix = f"{STAGED_PREFIX}/{uuid.uuid4()}"
         if source and remote_stretch:
             keys = {stem: ref for stem, (_, ref) in inputs.items()}
+            events = remote_stretch(keys, rate, out_prefix, chunk_s, start_fraction)
+        else:
+            deliver = r2_segment_deliverer(out_prefix) if r2_configured() else inline_segment_deliverer
+            events = _in_thread(lambda workdir, pool: run_speed_stream(
+                inputs, rate, workdir, pool, deliver, chunk_s, start_fraction))
+
+        try:
+            first = await anext(events)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="A stem is no longer in storage")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Speed change failed: {e}")
+
+        async def stream():
+            # If the client goes away mid-stream (e.g. it changed speed again, which aborts
+            # this request), Starlette cancels this generator; closing `events` then stops
+            # the stretch behind it (in-process: _in_thread; Modal: remote_stretch's flag).
             try:
-                urls = await remote_stretch(keys, rate, f"{STAGED_PREFIX}/{out_id}")
-            except FileNotFoundError:
-                raise HTTPException(status_code=404, detail="A stem is no longer in storage")
+                yield f"data: {json.dumps(first)}\n\n"
+                async for ev in events:
+                    yield f"data: {json.dumps(ev)}\n\n"
             except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Speed change failed: {e}")
-            return {"delivery": "url", "files": urls}
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            finally:
+                await events.aclose()
 
-        r2 = get_r2() if deliver_via_r2 else None  # boto3 clients are thread-safe
-        bucket = os.environ.get("R2_BUCKET_NAME")
-
-        def process_one(stem: str, kind: str, ref: str) -> str:
-            with tempfile.TemporaryDirectory() as workdir:
-                src = os.path.join(workdir, "src")
-                if kind == "r2":
-                    try:
-                        r2.download_file(bucket, ref, src)
-                    except ClientError as e:
-                        if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
-                            raise FileNotFoundError(ref)
-                        raise
-                else:
-                    with open(src, "wb") as fh:
-                        fh.write(base64.b64decode(ref))
-                out_path = stretch_stem(src, rate, workdir)
-                if deliver_via_r2:
-                    key = f"{STAGED_PREFIX}/{out_id}/{stem}.flac"
-                    r2.upload_file(out_path, bucket, key, ExtraArgs={"ContentType": "audio/flac"})
-                    return r2.generate_presigned_url(
-                        "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=86400)
-                with open(out_path, "rb") as fh:
-                    return base64.b64encode(fh.read()).decode()
-
-        loop = asyncio.get_running_loop()
-
-        async def run_one(stem, kind, ref):
-            try:
-                return stem, await loop.run_in_executor(None, process_one, stem, kind, ref)
-            except FileNotFoundError:
-                raise HTTPException(status_code=404, detail=f"Stem {stem} is no longer in storage")
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Speed change failed on {stem}: {e}")
-
-        results = await asyncio.gather(*(run_one(s, k, r) for s, (k, r) in inputs.items()))
-        return {"delivery": "url" if deliver_via_r2 else "base64", "files": dict(results)}
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     return web
+
+
+async def _in_thread(make_events: Callable[[str, object], Iterator[dict]]) -> AsyncIterator[dict]:
+    """Run a blocking event generator in a worker thread (with its own temp dir and stretch
+    pool) and iterate its events here. Stopping early — the client went away — closes the
+    generator, which cancels the stretch work that hasn't started."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    loop = asyncio.get_running_loop()
+    q: asyncio.Queue = asyncio.Queue()
+    stop = threading.Event()
+    end = object()
+
+    def run():
+        pool = ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
+        try:
+            with tempfile.TemporaryDirectory() as workdir:
+                gen = make_events(workdir, pool)
+                try:
+                    for ev in gen:
+                        loop.call_soon_threadsafe(q.put_nowait, ev)
+                        if stop.is_set():
+                            break
+                finally:
+                    gen.close()
+        except BaseException as e:  # noqa: BLE001 — re-raised on the event loop side
+            loop.call_soon_threadsafe(q.put_nowait, e)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+            loop.call_soon_threadsafe(q.put_nowait, end)
+
+    threading.Thread(target=run, daemon=True).start()
+    try:
+        while (item := await q.get()) is not end:
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+    finally:
+        stop.set()

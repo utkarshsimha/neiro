@@ -109,25 +109,38 @@ and only the web image includes it. Both reach the Modal images only via
    sidecar: it hits the same IP-blocking problem it's meant to solve).
 7. Practice mode's speed control (`/api/speed`) re-renders every stem at a new tempo via
    Rubber Band (the `rubberband` CLI run directly on WAV files, with ffmpeg decoding before
-   and encoding FLAC after — `stretch_stem` in `neiro_common.py`; decoding the MP3s in Python via
+   and encoding FLAC after — `stream_stretch` in `neiro_common.py`; decoding the MP3s in Python via
    soundfile was ~6x slower on long tracks) without shifting pitch. It only runs while
-   paused: the frontend disables the slider during playback and while a request is in
-   flight, and every request starts from the pristine (rate=1) stems rather than the
+   paused (the frontend disables the slider during playback), and every request starts
+   from the pristine (rate=1) stems rather than the
    currently-loaded buffers (so repeated speed changes don't compound re-stretches). When
    the stems are in R2 the client sends just their location (`source: {prefix: "tmp/<id>" |
-   "results/<id>", files}`) and the server reads them from the bucket and writes the
-   stretched FLACs back under `tmp/`, returning presigned URLs; otherwise (or on a 404 when
-   a staged copy expired) the client uploads the pristine bytes as base64 and gets base64
-   back. Profiling a 21-minute, 6-stem track showed base64-over-JSON transfer (~250 MB up,
+   "results/<id>", files}`) and the server reads them from the bucket; otherwise (or on a
+   404 when a staged copy expired) the client uploads the pristine bytes as base64.
+   Profiling a 21-minute, 6-stem track showed base64-over-JSON transfer (~250 MB up,
    ~530 MB down) and Python-side MP3 decoding as large costs next to the stretch itself;
    MP3 output was benchmarked and rejected (encoding costs more than the smaller download
-   saves). Stems are processed concurrently to stay under Modal's 150s web endpoint timeout.
-   On Modal, R2-backed requests are handed to a separate `stretch_stems` function (32 CPUs,
-   short scaledown window since idle reserved cores are billed) that splits each stem into
-   30s chunks stretched in parallel and rejoined with a correlation-normalised crossfade
-   (`stretch_wav_chunked`), working in `/dev/shm` because the container filesystem was the
-   bottleneck for the many chunk files. The web container itself only gets ~5-6 cores in
-   practice, so chunking there doesn't help.
+   saves). Each stem is cut into 30s chunks stretched in parallel and rejoined with a
+   correlation-normalised crossfade.
+   **The result is streamed** (`stream_stretch` in `neiro_common.py`): the response is SSE —
+   a `meta` event with the new timeline, then each (stem, ~30s segment) as a small FLAC
+   (presigned R2 URL under `tmp/`, or inline base64 without R2) the moment its two chunks are
+   done, playhead-first (the request's `start_fraction`), then `done`. The player
+   (`track` in `buildPracticeCard`) is a timeline of per-stem segment buffers: it schedules
+   ready segments back-to-back on the AudioContext clock, lets you play as soon as the
+   playhead's segment has every stem, and waits (⏳) at any segment that hasn't arrived,
+   resuming when it does; a failure partway through restores the last fully-loaded audio.
+   The speed controls stay usable while segments load: applying another speed aborts the
+   in-flight request, and the dropped connection stops the stretch behind it (in-process
+   via `_in_thread`; on Modal via a flag in the `neiro-stretch-cancels` `modal.Dict` that
+   `stretch_stems` polls — closing a `remote_gen` stream doesn't cancel the remote call, and
+   `FunctionCall.cancel` can't look up `remote_gen` calls). Segment downloads (`fetchStemBytes`)
+   abort and retry when a 5s window brings under 10% of the median recent download rate
+   (floor 16 KB/s) — connections occasionally stall or trickle for 25s+. 1.0x is decoded
+   locally from the pristine bytes. On Modal, R2-backed requests run on a separate `stretch_stems` generator
+   function (32 CPUs, short scaledown window since idle reserved cores are billed), working
+   in `/dev/shm` because the container filesystem was the bottleneck for the many chunk
+   files; the web container only gets ~5-6 cores in practice.
    Rubber Band was chosen after an earlier real-time AudioWorklet approach (SoundTouchJS)
    produced audible quality degradation on polyphonic stems — see git history — and
    offline batch processing has no such real-time-DSP quality ceiling.

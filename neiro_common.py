@@ -373,108 +373,268 @@ def run_cmd(cmd: list[str]) -> None:
         raise RuntimeError(f"{cmd[0]} failed: {proc.stderr.strip()[-500:]}")
 
 
-def stretch_wav_chunked(wav_in: str, wav_out: str, rate: float, workdir: str, pool,
-                        chunk_s: float, pad_s: float = 2.0, xfade_s: float = 0.05) -> None:
-    """Rubber Band over time chunks in parallel, rejoined with short crossfades.
+def _crossfade_ramps(xf: int):
+    """Raised-cosine fade-in/fade-out ramps of `xf` samples (they sum to 1), shaped (xf, 1)."""
+    import numpy as np
 
-    One rubberband process per stem is single-stream (~41s for a 21-minute stem on Modal),
-    so this cuts the stem into `chunk_s` pieces and stretches each in its own process (on
-    `pool`, shared across stems) with `pad_s` of extra context on both sides, so Rubber
-    Band's start-up/tail behaviour falls outside the part that's kept. Each piece's kept
-    region is then crossfaded into its neighbours over `xfade_s`, centred on the boundary.
-    Boundaries depend only on the input length, so every stem of a track is cut at the
-    same places and stays in sync. Streams to `wav_out` rather than holding the whole stem
-    in memory (a 21-minute stereo stem is ~450 MB as float32).
+    fade_in = (0.5 - 0.5 * np.cos(np.linspace(0, np.pi, xf, dtype=np.float32)))[:, None]
+    return fade_in, fade_in[::-1]
 
-    Output isn't bit-identical to a single pass — Rubber Band's phase state depends on
-    everything it has processed, so a chunk starting fresh renders the same audio with
-    different phases — but on a click-train test every transient landed at the same time
-    as in a single pass, and blind listening at the seams couldn't tell them apart."""
+
+def _to_int16(x):
+    """Float audio → int16, done here rather than by libsndfile, whose float→int16 conversion
+    differs by up to 1 LSB between output formats (WAV vs FLAC) — so the samples don't
+    depend on which container they're written to."""
+    import numpy as np
+
+    return np.rint(np.clip(x, -1.0, 1.0) * 32767).astype(np.int16)
+
+
+def _seam_crossfade(tail, head, fade_in, fade_out):
+    """Crossfade two adjacent chunks' renderings of the same overlap, level-matched.
+
+    Adjacent chunks render the overlap with different phases, so a plain crossfade
+    partly cancels and dips — ~3 dB mid-fade when uncorrelated — while an equal-power
+    one overshoots when they're partly correlated (measured ~50% on sustained tones).
+    Normalising by the measured correlation `rho` keeps the summed level flat either
+    way: this reduces to a plain crossfade at rho=1 and to equal-power at rho=0.
+    Measured against a single pass, seams came out within the same level variation as
+    mid-chunk audio."""
+    import numpy as np
+
+    rho = float(np.sum(tail * head) / (np.sqrt(np.sum(tail**2) * np.sum(head**2)) + 1e-12))
+    rho = min(max(rho, 0.0), 1.0)  # anti-correlated overlaps would need a big, risky boost
+    norm = np.sqrt(fade_in**2 + fade_out**2 + 2 * fade_in * fade_out * rho)
+    return (tail * fade_out + head * fade_in) / norm
+
+
+STEM_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,32}$")  # stem names end up in R2 keys
+
+
+def stream_stretch(srcs: dict[str, str], rate: float, workdir: str, pool, deliver,
+                   chunk_s: float = 30.0, start_fraction: float = 0.0,
+                   pad_s: float = 2.0, xfade_s: float = 0.05):
+    """Pitch-preserving time-stretch of every stem in `srcs` ({stem: audio file}) to `rate`,
+    yielding the output piece by piece as it's ready, so the browser can start playing
+    before the rest is done.
+
+    The stretch is Rubber Band — chosen over WSOLA/phase-vocoder options (e.g. the
+    AudioWorklet approach tried earlier) because it's tuned for polyphonic full mixes —
+    run as the rubberband CLI on 16-bit WAV (the same `rubberband -q --tempo <rate>` call
+    pyrubberband made). ffmpeg decodes the MP3s first: soundfile took ~11s per 21-minute
+    stem on Modal, ffmpeg under a second.
+
+    One rubberband process is single-stream (~41s for a 21-minute stem on Modal), so each
+    stem is cut into `chunk_s` pieces stretched in parallel on `pool` (shared across
+    stems), each with `pad_s` of extra context on both sides so Rubber Band's start-up and
+    tail behaviour fall outside the part that's kept, and neighbouring chunks are joined
+    with an `xfade_s` level-matched crossfade (_seam_crossfade) centred on the boundary.
+    Boundaries depend only on the input length, so every stem is cut at the same places
+    and stays in sync. The result isn't bit-identical to a single pass — Rubber Band's
+    phase state depends on everything it has processed, so a chunk starting fresh renders
+    the same audio with different phases — but on a click-train test every transient
+    landed where a single pass put it, and blind listening at the seams couldn't tell
+    them apart.
+
+    The output timeline is split into segments — segment j runs from the crossfade into
+    chunk j up to the crossfade into chunk j+1, so it needs only chunks j-1 and j — and
+    each (stem, segment) is delivered as a small FLAC the moment its two chunks are done.
+    Chunks are submitted to `pool` playhead-first and interleaved across stems — the
+    segment at `start_fraction` of the track, then onwards to the end, then back to the
+    start — so every stem's segment under the playhead finishes first.
+
+    `deliver(stem, index, flac_bytes)` returns what the client needs to fetch a segment
+    ({"url": ...} or {"b64": ...}); it's called from worker threads. Yields:
+
+      {"type": "meta", "sample_rate", "duration", "segments": [start seconds...], "first"}
+      {"type": "segment", "stem", "index", **deliver(...)}   — one per stem × segment
+      {"type": "done"}
+
+    Raises the first error from any worker."""
+    import io
+    import queue
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from functools import partial
+
     import numpy as np
     import soundfile as sf
 
-    info = sf.info(wav_in)
-    n, sr = info.frames, info.samplerate
+    stems = list(srcs)
+
+    def decode(stem):
+        wav = os.path.join(workdir, f"{stem}.wav")
+        run_cmd(["ffmpeg", "-loglevel", "error", "-y", "-i", srcs[stem], "-c:a", "pcm_s16le", wav])
+        return stem, wav, sf.info(wav)
+
+    decoded = list(pool.map(decode, stems))
+    wavs = {stem: wav for stem, wav, _ in decoded}
+    sr = decoded[0][2].samplerate
+    # One layout for all stems (they should be the same length; if not, shorter ones are
+    # zero-padded), so segment boundaries — and sync — are shared.
+    n = max(info.frames for _, _, info in decoded)
+
     chunk, pad = int(chunk_s * sr), int(pad_s * sr)
     bounds = list(range(0, n, chunk)) + [n]
     if len(bounds) > 2 and bounds[-1] - bounds[-2] < chunk // 2:
         del bounds[-2]  # fold a short tail into the previous chunk
     n_chunks = len(bounds) - 1
-    if n_chunks == 1:
-        run_cmd(["rubberband", "-q", "--tempo", str(rate), wav_in, wav_out])
-        return
-
-    def stretch_chunk(k: int) -> tuple[int, str]:
-        e0, e1 = max(0, bounds[k] - pad), min(n, bounds[k + 1] + pad)
-        src, dst = (os.path.join(workdir, f"chunk{k}_{s}.wav") for s in ("in", "out"))
-        sf.write(src, sf.read(wav_in, start=e0, stop=e1, dtype="int16")[0], sr, subtype="PCM_16")
-        run_cmd(["rubberband", "-q", "--tempo", str(rate), src, dst])
-        os.remove(src)
-        return e0, dst
-
     n_out = round(n / rate)
     xf = max(2, int(xfade_s * sr))
     half = xf // 2
-    fade_in = (0.5 - 0.5 * np.cos(np.linspace(0, np.pi, xf, dtype=np.float32)))[:, None]
-    fade_out = fade_in[::-1]  # fade_in + fade_out == 1 across the crossfade
+    fade_in, fade_out = _crossfade_ramps(xf)
+    starts = [0] + [round(bounds[k] / rate) - half for k in range(1, n_chunks)]
+    ends = starts[1:] + [n_out]
 
-    def crossfade(tail, head):
-        """Crossfade the two chunks' renderings of the same overlap, level-matched.
+    playhead = min(max(start_fraction, 0.0), 1.0) * n_out
+    first = max(j for j in range(n_chunks) if starts[j] <= playhead)
+    yield {"type": "meta", "sample_rate": sr, "duration": n_out / sr,
+           "segments": [s / sr for s in starts], "first": first}
 
-        Adjacent chunks render the overlap with different phases, so a plain crossfade
-        partly cancels and dips — ~3 dB mid-fade when uncorrelated — while an equal-power
-        one overshoots when they're partly correlated (measured ~50% on sustained tones).
-        Normalising by the measured correlation `rho` keeps the summed level flat either
-        way: this reduces to a plain crossfade at rho=1 and to equal-power at rho=0.
-        Measured against a single pass, seams came out within the same level variation as
-        mid-chunk audio."""
-        rho = float(np.sum(tail * head) / (np.sqrt(np.sum(tail**2) * np.sum(head**2)) + 1e-12))
-        rho = min(max(rho, 0.0), 1.0)  # anti-correlated overlaps would need a big, risky boost
-        norm = np.sqrt(fade_in**2 + fade_out**2 + 2 * fade_in * fade_out * rho)
-        return (tail * fade_out + head * fade_in) / norm
+    # Segment order: playhead onwards, then backwards; each segment j needs chunks j-1 and j.
+    order = ([first - 1] if first > 0 else []) + list(range(first, n_chunks)) + list(range(first - 2, -1, -1))
 
-    carry = None  # previous chunk's overlap (unfaded), waiting to be crossfaded with this one
-    with sf.SoundFile(wav_out, "w", sr, info.channels, subtype="PCM_16") as out:
-        # pool.map yields in order, so assembly proceeds while later chunks still stretch.
-        for k, (e0, dst) in enumerate(pool.map(stretch_chunk, range(n_chunks))):
-            piece = sf.read(dst, dtype="float32", always_2d=True)[0]
-            os.remove(dst)
-            # This chunk's span in the output: its own region, plus half a crossfade either side.
-            s = 0 if k == 0 else round(bounds[k] / rate) - half
-            e = n_out if k == n_chunks - 1 else round(bounds[k + 1] / rate) - half + xf
-            local = s - round(e0 / rate)  # where output sample `s` falls within this piece
-            seg = piece[local:local + (e - s)]
-            if len(seg) < e - s:  # rubberband's output length can be off by a few samples
-                seg = np.pad(seg, ((0, e - s - len(seg)), (0, 0)))
-            if k > 0:
-                seg[:xf] = crossfade(carry, seg[:xf])
-            if k < n_chunks - 1:
-                carry = seg[-xf:].copy()
-                seg = seg[:-xf]
-            out.write(np.clip(seg, -1.0, 1.0))
+    events = queue.Queue()  # segment events, or an exception from a worker
+    lock = threading.Lock()
+    done = {s: {} for s in stems}          # stem -> {chunk k: (e0, stretched path)}
+    started = {s: set() for s in stems}    # segments whose assembly has been kicked off
+    # Chunk k's file is read by segments k and k+1; delete it once both have used it.
+    reads_left = {s: {k: (2 if k + 1 < n_chunks else 1) for k in range(n_chunks)} for s in stems}
+    io_pool = ThreadPoolExecutor(max_workers=8)  # assembly/encode/delivery, off the stretch pool
+
+    def reporting_errors(fn):
+        def wrapped(*args):
+            try:
+                fn(*args)
+            except BaseException as e:  # noqa: BLE001 — handed to the consumer to raise
+                events.put(e)
+        return wrapped
+
+    def stretch_chunk(stem: str, k: int) -> tuple[int, str]:
+        e0, e1 = max(0, bounds[k] - pad), min(n, bounds[k + 1] + pad)
+        src, dst = (os.path.join(workdir, f"{stem}_{k}_{s}.wav") for s in ("in", "out"))
+        audio = sf.read(wavs[stem], start=e0, stop=e1, dtype="int16", always_2d=True)[0]
+        sf.write(src, audio, sr, subtype="PCM_16")
+        if rate == 1.0:
+            os.replace(src, dst)
+        else:
+            run_cmd(["rubberband", "-q", "--tempo", str(rate), src, dst])
+            os.remove(src)
+        return e0, dst
+
+    def read_out(stem: str, k: int, start: int, frames: int):
+        """`frames` samples of chunk k's stretched output, from output-timeline sample `start`."""
+        e0, path = done[stem][k]
+        local = start - round(e0 / rate)
+        seg = sf.read(path, start=local, stop=local + frames, dtype="float32", always_2d=True)[0]
+        if len(seg) < frames:  # rubberband's output length can be off by a few samples
+            seg = np.pad(seg, ((0, frames - len(seg)), (0, 0)))
+        return seg
+
+    def release(stem: str, k: int) -> None:
+        with lock:
+            reads_left[stem][k] -= 1
+            last_read = reads_left[stem][k] == 0
+        if last_read:
+            os.remove(done[stem][k][1])
+
+    @reporting_errors
+    def assemble(stem: str, j: int) -> None:
+        s, e = starts[j], ends[j]
+        seg = read_out(stem, j, s, e - s)
+        if j > 0:
+            tail = read_out(stem, j - 1, s, xf)  # chunk j-1's rendering of the same overlap
+            seg[:xf] = _seam_crossfade(tail, seg[:xf], fade_in, fade_out)
+        buf = io.BytesIO()
+        sf.write(buf, _to_int16(seg), sr, format="FLAC", subtype="PCM_16")
+        payload = deliver(stem, j, buf.getvalue())
+        events.put({"type": "segment", "stem": stem, "index": j, **payload})
+        release(stem, j)
+        if j > 0:
+            release(stem, j - 1)
+
+    @reporting_errors
+    def on_chunk_done(stem: str, k: int, fut) -> None:
+        e0, path = fut.result()
+        with lock:
+            done[stem][k] = (e0, path)
+            ready = [j for j in (k, k + 1)
+                     if j < n_chunks and j not in started[stem]
+                     and j in done[stem] and (j == 0 or j - 1 in done[stem])]
+            started[stem].update(ready)
+        for j in ready:
+            io_pool.submit(assemble, stem, j)
+
+    futures = []
+    try:
+        for k in order:
+            for stem in stems:  # interleaved, so all stems' chunks for a segment finish together
+                fut = pool.submit(stretch_chunk, stem, k)
+                fut.add_done_callback(partial(on_chunk_done, stem, k))
+                futures.append(fut)
+        for _ in range(n_chunks * len(stems)):
+            ev = events.get()
+            if isinstance(ev, BaseException):
+                raise ev
+            yield ev
+        yield {"type": "done"}
+    finally:
+        for fut in futures:  # on error or client disconnect, drop what hasn't started
+            fut.cancel()
+        io_pool.shutdown(wait=False, cancel_futures=True)
 
 
-def stretch_stem(src_path: str, rate: float, workdir: str, pool=None,
-                 chunk_s: float | None = None) -> str:
-    """Pitch-preserving time-stretch via Rubber Band — chosen over WSOLA/phase-vocoder
-    options (e.g. the AudioWorklet approach tried earlier) because it's specifically tuned
-    for polyphonic full mixes, not just monophonic/speech material.
+def fetch_speed_inputs(inputs: dict, workdir: str) -> dict[str, str]:
+    """Materialise /api/speed inputs — {stem: ("r2", key) | ("b64", data)} — as files in
+    `workdir`, concurrently. Raises FileNotFoundError if an R2 stem is gone (e.g. an
+    expired tmp/ copy), which the API turns into a 404 so the client can re-upload."""
+    from concurrent.futures import ThreadPoolExecutor
 
-    Runs the rubberband CLI directly on files — the same `rubberband -q --tempo <rate>`
-    call on 16-bit WAV that pyrubberband made — with ffmpeg decoding before and encoding
-    FLAC after. Decoding the MP3 in Python via soundfile took ~11s per stem on a 21-minute
-    track on Modal; ffmpeg does it in under a second. With `chunk_s` (and a thread `pool`)
-    the stretch is split into parallel chunks — see stretch_wav_chunked. Returns the output
-    FLAC's path."""
-    wav_in = os.path.join(workdir, "in.wav")
-    wav_out = os.path.join(workdir, "stretched.wav")
-    flac_out = os.path.join(workdir, "out.flac")
-    run_cmd(["ffmpeg", "-loglevel", "error", "-y", "-i", src_path, "-c:a", "pcm_s16le", wav_in])
-    if rate == 1.0:
-        wav_out = wav_in  # like pyrubberband, don't run a no-op stretch
-    elif chunk_s:
-        stretch_wav_chunked(wav_in, wav_out, rate, workdir, pool, chunk_s)
-    else:
-        run_cmd(["rubberband", "-q", "--tempo", str(rate), wav_in, wav_out])
-    run_cmd(["ffmpeg", "-loglevel", "error", "-y", "-i", wav_out, "-c:a", "flac", flac_out])
-    return flac_out
+    from botocore.exceptions import ClientError
+
+    needs_r2 = any(kind == "r2" for kind, _ in inputs.values())
+    r2, bucket = (get_r2(), os.environ["R2_BUCKET_NAME"]) if needs_r2 else (None, None)
+
+    def one(item):
+        stem, (kind, ref) = item
+        path = os.path.join(workdir, f"{stem}.src")
+        if kind == "r2":
+            try:
+                r2.download_file(bucket, ref, path)
+            except ClientError as e:
+                if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
+                    raise FileNotFoundError(ref)
+                raise
+        else:
+            with open(path, "wb") as fh:
+                fh.write(base64.b64decode(ref))
+        return stem, path
+
+    with ThreadPoolExecutor(max_workers=len(inputs)) as pool:
+        return dict(pool.map(one, inputs.items()))
+
+
+def run_speed_stream(inputs: dict, rate: float, workdir: str, pool, deliver,
+                     chunk_s: float, start_fraction: float):
+    """The whole of a streamed speed change: fetch the inputs (see fetch_speed_inputs), then
+    yield stream_stretch's events. Shared by the in-process path and Modal's stretch_stems."""
+    srcs = fetch_speed_inputs(inputs, workdir)
+    yield from stream_stretch(srcs, rate, workdir, pool, deliver, chunk_s, start_fraction)
+
+
+def r2_segment_deliverer(out_prefix: str):
+    """A stream_stretch `deliver` that uploads each segment to R2 and returns a presigned URL."""
+    r2, bucket = get_r2(), os.environ["R2_BUCKET_NAME"]
+
+    def deliver(stem: str, index: int, data: bytes) -> dict:
+        key = f"{out_prefix}/{stem}/{index:04d}.flac"
+        r2.put_object(Bucket=bucket, Key=key, Body=data, ContentType="audio/flac")
+        return {"url": r2.generate_presigned_url(
+            "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=86400)}
+
+    return deliver
+
+
+def inline_segment_deliverer(stem: str, index: int, data: bytes) -> dict:
+    """A stream_stretch `deliver` for when R2 isn't configured: the segment rides in the event."""
+    return {"b64": base64.b64encode(data).decode()}
