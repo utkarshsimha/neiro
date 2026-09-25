@@ -43,11 +43,17 @@ slow), `--BigShifts N` (shift-average passes, 1=off/3–11=typical), `--output_f
 
 ### Two parallel FastAPI apps, one shared contract
 
-`app.py` (local) and the `fastapi_app` closure inside `modal_app.py` (Modal) are **independent,
-duplicated implementations** of the same API surface (`/`, `/api/separate`, `/api/youtube`,
-`/api/share/save`, `/api/result/{job_id}`, `/api/audio-proxy`, R2 helpers, `DEFAULTS` dict). They are
-not imported from a shared module — when changing request/response shapes, defaults, or
-endpoint behavior, **update both files**. `app.py`'s Modal GPU path calls into `modal_app.py`'s
+`app.py` (local) and the `fastapi_app` closure inside `modal_app.py` (Modal) each define the
+same API surface's **route handlers** (`/`, `/api/separate`, `/api/youtube`, `/api/share/save`,
+`/api/library`, `/api/result/{job_id}`, `/api/audio-proxy`, `/api/speed`) — when changing
+request/response shapes or endpoint behavior, **update both files**. Everything else they have
+in common lives in `neiro_common.py`, which both import: `DEFAULTS`, separation output
+handling (`finalize_outputs`), SSE streaming (`queue_to_sse`), YouTube/Cobalt ingestion, the
+R2 helpers (client, staging, save/library/manifest) and the speed-change helpers — put new
+shared logic there rather than copying it. Keep that module's top-level imports stdlib-only —
+`modal_app.py` imports it at the top, so it loads in every Modal container including the GPU
+one — and remember `modal_app.py`'s images only see it via
+`add_local_python_source("neiro_common")`. `app.py`'s Modal GPU path calls into `modal_app.py`'s
 `separate` function via `ma.separate.remote_gen.aio(...)`; its CPU path calls `inference.py`
 directly in a background thread.
 
@@ -87,13 +93,13 @@ directly in a background thread.
    and `modal_app.py` need `COBALT_URL` / `COBALT_API_KEY` set (`.env` locally, the `cobalt`
    Modal secret in production — `make deploy-cobalt` deploys Cobalt and creates that secret).
    YouTube sometimes requires a proof-of-origin token Cobalt can't obtain from Modal's IP
-   range, in which case it silently returns an empty file instead of erroring — `_download_yt`
-   in both files treats an empty download as a hard error rather than passing it to the
+   range, in which case it silently returns an empty file instead of erroring — `download_yt`
+   (in `neiro_common.py`) treats an empty download as a hard error rather than passing it to the
    separation pipeline (see the note in `cobalt_app.py` on why there's no token-provider
    sidecar: it hits the same IP-blocking problem it's meant to solve).
 7. Practice mode's speed control (`/api/speed`) re-renders every stem at a new tempo via
    Rubber Band (the `rubberband` CLI run directly on WAV files, with ffmpeg decoding before
-   and encoding FLAC after — `_stretch_stem` in both files; decoding the MP3s in Python via
+   and encoding FLAC after — `stretch_stem` in `neiro_common.py`; decoding the MP3s in Python via
    soundfile was ~6x slower on long tracks) without shifting pitch. It only runs while
    paused: the frontend disables the slider during playback and while a request is in
    flight, and every request starts from the pristine (rate=1) stems rather than the
@@ -109,7 +115,7 @@ directly in a background thread.
    On Modal, R2-backed requests are handed to a separate `stretch_stems` function (32 CPUs,
    short scaledown window since idle reserved cores are billed) that splits each stem into
    30s chunks stretched in parallel and rejoined with a correlation-normalised crossfade
-   (`_stretch_wav_chunked`), working in `/dev/shm` because the container filesystem was the
+   (`stretch_wav_chunked`), working in `/dev/shm` because the container filesystem was the
    bottleneck for the many chunk files. The web container itself only gets ~5-6 cores in
    practice, so chunking there doesn't help.
    Rubber Band was chosen after an earlier real-time AudioWorklet approach (SoundTouchJS)
