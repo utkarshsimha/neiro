@@ -19,10 +19,12 @@ touching Modal at all.
 See [CLAUDE.md](CLAUDE.md) for the full architecture writeup. The single most
 important thing to know before making a change:
 
-> **`app.py` (local) and `modal_app.py` (Modal) are independent, duplicated
-> implementations of the same API surface** — they are not imported from a shared
-> module. If you change a request/response shape, a default, or endpoint behavior,
-> **update both files**, or the local and deployed versions will drift apart.
+> **The API is defined once, in `neiro_web.py`**, and both the local server (`app.py`)
+> and the Modal deployment (`modal_app.py`) build their app from it. Change routes there,
+> and put shared non-route logic in `neiro_common.py`. `app.py` and `modal_app.py` only
+> hold what genuinely differs between the two (local CPU inference, Modal functions and
+> images) — if you find yourself adding the same code to both, it belongs in one of the
+> shared modules instead.
 
 Other things worth knowing before you dig in:
 

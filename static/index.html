@@ -1801,7 +1801,8 @@ const PRACTICE_STEMS = ['vocals','bass','drums','guitar','piano','other'];
 
 // `files` is {name: url} when it came from a saved/shared result or was staged server-side
 // (`jobId` set — Save then just promotes that job), or {name: base64} when the server couldn't
-// stage it (R2 unconfigured/failed), in which case there's nothing to save.
+// stage it (R2 unconfigured/failed), in which case there's nothing to save. For a saved/shared
+// result `jobId` is its library id (used only to let /api/speed read the stems from R2).
 async function showResults(files, fromShare = false, jobId = null) {
   const filesAreUrls = fromShare || !!jobId;
   blobUrls.forEach(u => URL.revokeObjectURL(u));
@@ -1844,6 +1845,7 @@ async function showResults(files, fromShare = false, jobId = null) {
     });
 
   const stemFiles = {};
+  const stemNames = {};  // stem -> filename, so /api/speed can find it in R2
 
   for (const fname of sorted) {
     const stem = fname.replace(/\.\w+$/, '').split('_').pop();
@@ -1857,7 +1859,7 @@ async function showResults(files, fromShare = false, jobId = null) {
       blobUrls.push(url);
     }
     stemButtons.appendChild(buildStemCard(info, url, fname));
-    if (PRACTICE_STEMS.includes(stem)) stemFiles[stem] = url;
+    if (PRACTICE_STEMS.includes(stem)) { stemFiles[stem] = url; stemNames[stem] = fname; }
     // Yield between files so browser stays responsive
     await new Promise(r => setTimeout(r, 0));
   }
@@ -1865,7 +1867,11 @@ async function showResults(files, fromShare = false, jobId = null) {
   // Practice Mode is the main event when we have enough stems to mix — the
   // individual per-stem players are then just a secondary download option.
   if (Object.keys(stemFiles).length >= 3) {
-    const pc = buildPracticeCard(stemFiles);
+    // Where the stems live in R2 (saved → results/, fresh run → staged tmp/), if they do.
+    const r2Source = jobId
+      ? { prefix: `${fromShare ? 'results' : 'tmp'}/${jobId}`, files: stemNames }
+      : null;
+    const pc = buildPracticeCard(stemFiles, r2Source);
     practiceMount.appendChild(pc);
     stemsDetails.classList.remove('hidden');
   } else {
@@ -1937,20 +1943,108 @@ function buildStemCard(info, url, fname) {
 }
 
 // ── GarageBand export: fetch stem bytes + build a plain (store-only) ZIP ────
-async function fetchStemBytes(url) {
-  async function tryFetch(u) {
-    const r = await fetch(u);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return new Uint8Array(await r.arrayBuffer());
+// Yield each `data:` message of a server-sent-events response body as parsed JSON.
+async function* readSSE(body) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      if (line.startsWith('data: ')) yield JSON.parse(line.slice(6));
+    }
+  }
+}
+
+// A direct download that makes too little progress over a window this long — nothing at
+// all (waiting for the response, or between chunks), or a trickle — is treated as stalled:
+// aborted and retried. Connections occasionally just stop delivering (one segment once sat
+// for 25s with no error while the rest took ~0.25s) or slow to a crawl for a long time
+// before stopping (another trickled for ~26s), and a fresh request normally goes through
+// at full speed.
+const FETCH_STALL_MS = 5000;
+// "Too little" adapts to the connection: under 10% of the median rate recent downloads
+// managed (so a slow network doesn't make every download look stalled), with a floor.
+const FETCH_TRICKLE_FRACTION = 0.1;
+const FETCH_MIN_BYTES_PER_S = 16 * 1024;
+const recentFetchRates = [];  // bytes/s of recently completed downloads (body only)
+
+function stallThresholdBytes(windowMs) {
+  const sorted = [...recentFetchRates].sort((a, b) => a - b);
+  const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+  return Math.max(FETCH_MIN_BYTES_PER_S, FETCH_TRICKLE_FRACTION * median) * windowMs / 1000;
+}
+
+class FetchStall extends Error {}
+
+// `signal` aborts the download (and skips any remaining retries).
+async function fetchStemBytes(url, { signal } = {}) {
+  // With `stallMs`, abort when the last `stallMs` brought too little data (see
+  // stallThresholdBytes) — progress-based rather than a total timeout, so big files on
+  // slow connections are fine as long as bytes keep coming at a reasonable rate.
+  async function tryFetch(u, stallMs = null) {
+    const ctl = new AbortController();
+    const onAbort = () => ctl.abort(signal.reason);
+    signal?.addEventListener('abort', onAbort);
+    const t0 = performance.now();
+    const arrivals = [];  // [time, bytes] of recent chunks, for the sliding window
+    let checker = null;
+    if (stallMs) {
+      checker = setInterval(() => {
+        const now = performance.now();
+        if (now - t0 < stallMs) return;
+        while (arrivals.length && arrivals[0][0] < now - stallMs) arrivals.shift();
+        const got = arrivals.reduce((a, [, n]) => a + n, 0);
+        if (got < stallThresholdBytes(stallMs))
+          ctl.abort(new FetchStall(got ? `stalled: only ${(got / 1024).toFixed(0)} KB in ${stallMs / 1000}s`
+                                       : `stalled: no data for ${stallMs / 1000}s`));
+      }, 500);
+    }
+    try {
+      const r = await fetch(u, { signal: ctl.signal });
+      const tHeaders = performance.now();
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      arrivals.push([tHeaders, 0]);
+      const reader = r.body.getReader();
+      const parts = [];
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value);
+        total += value.length;
+        arrivals.push([performance.now(), value.length]);
+      }
+      const bodySecs = (performance.now() - tHeaders) / 1000;
+      if (stallMs && total > 256 * 1024 && bodySecs > 0) {
+        recentFetchRates.push(total / bodySecs);
+        if (recentFetchRates.length > 50) recentFetchRates.shift();
+      }
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const p of parts) { bytes.set(p, offset); offset += p.length; }
+      return bytes;
+    } finally {
+      clearInterval(checker);
+      signal?.removeEventListener('abort', onAbort);
+    }
   }
   if (url.startsWith('blob:')) return tryFetch(url);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await tryFetch(url);
-    } catch (_) {
-      if (attempt < 2) await new Promise(r => setTimeout(r, 1500));
+      return await tryFetch(url, FETCH_STALL_MS);
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      // A stall already waited long enough; other failures (e.g. CORS right after a cold
+      // deploy) get a moment before trying again.
+      if (attempt < 2 && !(e instanceof FetchStall)) await new Promise(r => setTimeout(r, 1500));
     }
   }
+  // The proxy fetches the whole file before responding, so no stall timeout there.
   return tryFetch(`/api/audio-proxy?url=${encodeURIComponent(url)}`);
 }
 
@@ -2033,7 +2127,9 @@ function buildZip(entries) {
   return new Blob([...localParts, ...centralParts, new Uint8Array(endRecord.buffer)], { type: 'application/zip' });
 }
 
-function buildPracticeCard(stemFilesMap) {
+// `r2Source` ({prefix, files: {stem: filename}}) says where the stems are in R2, so speed
+// changes can have the server read them there instead of re-uploading; null if they aren't.
+function buildPracticeCard(stemFilesMap, r2Source = null) {
   const STEM_ORDER = ['vocals','bass','drums','guitar','piano','other'];
   const stems = STEM_ORDER.filter(s => stemFilesMap[s]);
 
@@ -2146,17 +2242,33 @@ function buildPracticeCard(stemFilesMap) {
   // Web Audio state (populated after async load)
   let ctx = null;
   let gainNodes = null;
-  let buffers = null;
+  // The loaded audio, as a timeline of segments with one AudioBuffer per stem each. The
+  // initial load is a single segment; a speed change streams in ~30s segments (see
+  // applySpeed), so until it finishes some are still missing — playback then waits
+  // ("buffering") at the first missing one and carries on when it arrives.
+  let track = null;          // { starts: [seconds], bufs: {stem: [AudioBuffer|null]}, ready: [bool] }
   let pristineBytes = null;  // original (rate=1) compressed stem bytes, kept so re-applying
                              // speed always starts fresh instead of compounding re-stretches
   let currentRate = 1;
-  let sources = {};
+  let sources = [];          // every AudioBufferSourceNode scheduled for the current play
+  let scheduled = new Set(); // segment indices scheduled for the current play
   let ppPlaying = false;
+  let waitingToPlay = false; // play requested, but the audio under the playhead hasn't arrived
   let startOffset = 0;       // seconds into track when play() was last called
-  let playCtxTime = 0;       // ctx.currentTime when play() was called
-  let playGen = 0;           // incremented on each stop to cancel stale onended
+  let playCtxTime = 0;       // ctx.currentTime at which position `startOffset` plays
   let duration = 0;
   let rafId = null;
+
+  function makeTrack(starts) {
+    return { starts, ready: starts.map(() => false),
+             bufs: Object.fromEntries(stems.map(s => [s, starts.map(() => null)])) };
+  }
+  function segEnd(j) { return j + 1 < track.starts.length ? track.starts[j + 1] : duration; }
+  function segAt(t) {
+    let j = 0;
+    while (j + 1 < track.starts.length && track.starts[j + 1] <= t) j++;
+    return j;
+  }
 
   function computedVol(stem) {
     if (muteSet.has(stem)) return 0;
@@ -2178,6 +2290,34 @@ function buildPracticeCard(stemFilesMap) {
     return Math.min(startOffset + (ctx.currentTime - playCtxTime), duration);
   }
 
+  function stopSources() {
+    sources.forEach(src => { try { src.stop(); } catch(_) {} });
+    sources = [];
+    scheduled = new Set();
+  }
+
+  // Schedule every stem's buffer for segment j against the current play's clock. Segments
+  // abut exactly (the server crossfades the seams), and each start time is derived from
+  // the same ctx clock, so consecutive segments join sample-accurately.
+  function scheduleSegment(j) {
+    scheduled.add(j);
+    const s = track.starts[j];
+    stems.forEach(stem => {
+      const src = ctx.createBufferSource();
+      src.buffer = track.bufs[stem][j];
+      src.connect(gainNodes[stem]);
+      if (s >= startOffset) src.start(playCtxTime + (s - startOffset));
+      else src.start(playCtxTime, startOffset - s);  // the segment we're starting inside
+      sources.push(src);
+    });
+  }
+
+  function setWaiting(on) {
+    waitingToPlay = on;
+    playBtn.textContent = on ? '⏳' : (ppPlaying ? '⏸' : '▶');
+    playBtn.title = on ? 'Waiting for this part of the track to arrive…' : '';
+  }
+
   function doPlay() {
     // Pause any individual stem players
     document.querySelectorAll('.stem-audio').forEach(a => {
@@ -2186,44 +2326,36 @@ function buildPracticeCard(stemFilesMap) {
       if (b) { b.textContent = '▶'; b.classList.remove('playing'); }
     });
     if (ctx.state === 'suspended') ctx.resume();
-    const gen = ++playGen;
-    const when = ctx.currentTime + 0.05;   // schedule 50 ms ahead — all stems start at identical ctx time
-    const off  = startOffset;
-    stems.forEach(stem => {
-      const src = ctx.createBufferSource();
-      src.buffer = buffers[stem];
-      src.connect(gainNodes[stem]);
-      src.start(when, off);
-      sources[stem] = src;
-    });
-    sources[stems[0]].onended = () => {
-      if (playGen !== gen) return;
-      if (getPosition() >= duration - 0.15) {
-        ppPlaying = false; startOffset = 0;
-        playBtn.textContent = '▶'; playBtn.classList.remove('playing');
-      }
-    };
-    playCtxTime = when;
+    if (!track.ready[segAt(startOffset)]) { setWaiting(true); return; }  // resumed by onSegmentReady
+    stopSources();
+    playCtxTime = ctx.currentTime + 0.05;   // schedule 50 ms ahead — all stems start at identical ctx time
+    track.starts.forEach((_, j) => { if (track.ready[j] && segEnd(j) > startOffset) scheduleSegment(j); });
     ppPlaying = true;
-    playBtn.textContent = '⏸';
+    setWaiting(false);
     playBtn.classList.add('playing');
     speedSlider.disabled = true; // speed only adjustable while paused (it reprocesses the stems)
   }
 
   function doPause() {
     startOffset = getPosition();
-    playGen++;
-    stems.forEach(stem => { try { sources[stem]?.stop(); } catch(_) {} });
+    stopSources();
     ppPlaying = false;
+    setWaiting(false);
     speedSlider.disabled = false;
-    playBtn.textContent = '▶'; playBtn.classList.remove('playing');
+    playBtn.classList.remove('playing');
   }
 
   function doSeek(t) {
-    const was = ppPlaying;
-    if (was) { playGen++; stems.forEach(stem => { try { sources[stem]?.stop(); } catch(_) {} }); ppPlaying = false; }
+    const was = ppPlaying || waitingToPlay;
+    if (ppPlaying) { stopSources(); ppPlaying = false; }
     startOffset = Math.max(0, Math.min(t, duration));
     if (was) doPlay();
+  }
+
+  // A segment of a streamed speed change has arrived for every stem.
+  function onSegmentReady(j) {
+    if (ppPlaying && !scheduled.has(j) && track.starts[j] > getPosition() + 0.05) scheduleSegment(j);
+    if (waitingToPlay && track.ready[segAt(startOffset)]) doPlay();
   }
 
   // Drag-to-seek — commits only on pointerup; display updates live during drag
@@ -2264,9 +2396,22 @@ function buildPracticeCard(stemFilesMap) {
     seekDragTime = null;
   });
 
-  // RAF ticker — position display driven by AudioContext clock (no polling audio elements)
+  // RAF ticker — position display driven by AudioContext clock (no polling audio elements).
+  // It also ends playback at the end of the track, and stalls it (then onSegmentReady
+  // resumes) when it reaches a segment of a streamed speed change that hasn't arrived yet.
   function startTicker() {
     function tick() {
+      if (ppPlaying) {
+        const p = getPosition();
+        if (p >= duration - 0.01) {
+          stopSources(); ppPlaying = false; startOffset = 0;
+          speedSlider.disabled = false;
+          playBtn.textContent = '▶'; playBtn.classList.remove('playing');
+        } else if (!track.ready[segAt(p)]) {
+          doPause();
+          setWaiting(true);
+        }
+      }
       if (!seekDragging && duration) {
         const p = getPosition();
         const pct = (p / duration) * 100;
@@ -2279,7 +2424,11 @@ function buildPracticeCard(stemFilesMap) {
     rafId = requestAnimationFrame(tick);
   }
 
-  playBtn.addEventListener('click', () => { if (ppPlaying) doPause(); else doPlay(); });
+  playBtn.addEventListener('click', () => {
+    if (ppPlaying) doPause();
+    else if (waitingToPlay) setWaiting(false);  // stop waiting for the audio to arrive
+    else doPlay();
+  });
   restartBtn.addEventListener('click', () => doSeek(0));
   skipBackBtn.addEventListener('click', () => doSeek(getPosition() - 5));
   skipFwdBtn.addEventListener('click', () => doSeek(getPosition() + 5));
@@ -2295,9 +2444,9 @@ function buildPracticeCard(stemFilesMap) {
   // The slider's displayed number tracks the thumb live (see 'input' below) — it's
   // just a preview until the user clicks Apply, which is what actually triggers the
   // (paused-only) server-side reprocessing. The Apply button stays grayed out until
-  // the chosen value differs from what's currently loaded.
+  // the chosen value differs from what's loaded (or still loading).
   function refreshSpeedApplyState() {
-    speedApplyBtn.disabled = sliderToRate() === currentRate;
+    speedApplyBtn.disabled = sliderToRate() === (speedRun ? speedRun.rate : currentRate);
   }
 
   speedSlider.addEventListener('input', () => {
@@ -2306,44 +2455,144 @@ function buildPracticeCard(stemFilesMap) {
   });
 
   // Applying a new rate re-runs each stem through the server's pitch-preserving
-  // time-stretch (rubberband) and reloads the resulting buffers, so it always starts
-  // from the pristine (rate=1) bytes rather than compounding re-stretches of an
-  // already-stretched buffer.
-  let isApplyingSpeed = false;
-  async function applySpeed(rate) {
-    if (ppPlaying || rate === currentRate || isApplyingSpeed) return;
-    isApplyingSpeed = true;
-    [playBtn, restartBtn, skipBackBtn, skipFwdBtn, speedSlider, speedApplyBtn, gbBtn].forEach(el => el.disabled = true);
-    speedStatusEl.classList.remove('hidden');
-    try {
+  // time-stretch (rubberband), always from the pristine (rate=1) bytes rather than
+  // compounding re-stretches of an already-stretched buffer. The server streams the
+  // result back in ~30s segments, the one under the playhead first (see /api/speed), so
+  // playback can start as soon as that segment has arrived for every stem while the rest
+  // keep loading. Going back to 1.0x needs no server at all: it's the pristine audio.
+  //
+  // The speed controls stay usable while segments are still loading: applying another
+  // speed aborts the in-flight one (dropping the request makes the server stop its
+  // stretch too — see /api/speed) and starts over from the same point in the song.
+  let speedRun = null;       // the in-flight speed change: { rate, abort: AbortController }
+  let settled = null;        // the last fully-loaded audio { track, duration, rate } — restored on failure
+  const transportBtns = [playBtn, restartBtn, skipBackBtn, skipFwdBtn];
+
+  // Run `fn`s (returning promises) at most `n` at a time, in the order they were queued.
+  function makeLimiter(n) {
+    let active = 0;
+    const queue = [];
+    const next = () => {
+      if (active >= n || !queue.length) return;
+      active++;
+      const { fn, resolve, reject } = queue.shift();
+      fn().then(resolve, reject).finally(() => { active--; next(); });
+    };
+    return fn => new Promise((resolve, reject) => { queue.push({ fn, resolve, reject }); next(); });
+  }
+
+  async function startSpeedStream(rate, fraction, signal) {
+    const postSpeed = body => fetch('/api/speed', {
+      method: 'POST',
+      signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, rate, start_fraction: fraction }),
+    });
+    // Preferably the server reads the stems straight from R2; if they aren't there
+    // (no R2, or the staged copy expired → 404) upload the pristine bytes instead.
+    let resp = r2Source ? await postSpeed({ source: r2Source }) : null;
+    if (!resp || resp.status === 404) {
       const filesB64 = {};
       stems.forEach(stem => { filesB64[stem] = arrayBufferToBase64(pristineBytes[stem]); });
-      const resp = await fetch('/api/speed', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ files: filesB64, rate }),
-      });
-      if (!resp.ok) throw new Error(await resp.text());
-      const { files } = await resp.json();
-      const fraction = duration ? startOffset / duration : 0;
-      await Promise.all(stems.map(async stem => {
-        const bytes = Uint8Array.from(atob(files[stem]), c => c.charCodeAt(0)).buffer;
-        buffers[stem] = await ctx.decodeAudioData(bytes);
-      }));
-      duration = buffers[stems[0]].duration;
-      startOffset = fraction * duration;
+      resp = await postSpeed({ files: filesB64 });
+    }
+    if (!resp.ok) throw new Error(await resp.text());
+    return resp;
+  }
+
+  async function applySpeed(rate) {
+    if (ppPlaying || rate === (speedRun ? speedRun.rate : currentRate)) return;
+    speedRun?.abort.abort();  // superseded: it bows out quietly (see `superseded` below)
+    const run = speedRun = { rate, abort: new AbortController() };
+    const superseded = () => speedRun !== run;
+    // Until the new timeline arrives there's nothing to play; the speed controls stay live.
+    transportBtns.forEach(el => el.disabled = true);
+    speedStatusEl.classList.remove('hidden');
+    refreshSpeedApplyState();
+    setWaiting(false);
+    const fraction = duration ? startOffset / duration : 0;
+    // Switch to the new (possibly still empty) timeline, keeping the playhead at the
+    // same point in the song, so segments have somewhere to land as they arrive...
+    const swapIn = (newTrack, newDuration) => {
+      track = newTrack; duration = newDuration; startOffset = fraction * duration;
       currentRate = rate;
       showT(startOffset);
+    };
+    // ...but keep the transport locked (and "Applying…" up) until the audio under the
+    // playhead has arrived for every stem, so pressing play always plays right away.
+    const unlock = () => {
+      if (superseded()) return;
+      transportBtns.forEach(el => el.disabled = false);
+      speedStatusEl.classList.add('hidden');
+    };
+    try {
+      if (rate === 1) {
+        const t = makeTrack([0]);
+        await Promise.all(stems.map(async stem => {
+          t.bufs[stem][0] = await ctx.decodeAudioData(pristineBytes[stem].slice(0));
+        }));
+        if (superseded()) return;
+        t.ready[0] = true;
+        swapIn(t, t.bufs[stems[0]][0].duration);
+        unlock();
+      } else {
+        const resp = await startSpeedStream(rate, fraction, run.abort.signal);
+        const limit = makeLimiter(8);
+        const loads = [];
+        let t = null, firstSeg = 0;  // firstSeg: the segment under the playhead
+        const loadSegment = async ev => {
+          if (superseded()) return;  // don't spend bandwidth on a speed that's been replaced
+          const bytes = ev.url
+            ? (await fetchStemBytes(ev.url, { signal: run.abort.signal })).buffer
+            // Decoding base64 via a data: URL is native — ~3x faster than a per-byte JS loop,
+            // and off the main thread, which matters with dozens of multi-MB segments.
+            : await (await fetch('data:application/octet-stream;base64,' + ev.b64)).arrayBuffer();
+          t.bufs[ev.stem][ev.index] = await ctx.decodeAudioData(bytes);
+          if (stems.every(s => t.bufs[s][ev.index])) {
+            t.ready[ev.index] = true;
+            if (ev.index === firstSeg && t === track) unlock();
+            if (t === track) onSegmentReady(ev.index);
+          }
+        };
+        for await (const ev of readSSE(resp.body)) {
+          if (ev.type === 'meta') {
+            t = makeTrack(ev.segments);
+            firstSeg = ev.first;
+            swapIn(t, ev.duration);
+          } else if (ev.type === 'segment') {
+            const load = limit(() => loadSegment(ev));
+            load.catch(() => {});  // surfaced by the Promise.all below, once the stream ends
+            loads.push(load);
+          } else if (ev.type === 'error') {
+            throw new Error(ev.message);
+          }
+        }
+        await Promise.all(loads);
+        if (superseded()) return;
+        if (!t || !t.ready.every(Boolean)) throw new Error('the stream ended before every segment arrived');
+      }
+      settled = { track, duration, rate };
     } catch (e) {
+      if (superseded()) return;  // aborted by a newer speed change, which now owns the UI
       console.error('Speed change failed:', e);
       alert('Could not change speed: ' + e.message);
+      // Put back the last fully-loaded audio, at the same point in the song.
+      if (ppPlaying) { stopSources(); ppPlaying = false; }
+      setWaiting(false);
+      playBtn.classList.remove('playing');
+      ({ track, duration } = settled);
+      currentRate = settled.rate;
+      startOffset = fraction * duration;
+      showT(startOffset);
       setSliderToRate(currentRate); // revert the slider to the last successfully-applied rate
     } finally {
-      speedValueEl.textContent = sliderToRate().toFixed(1) + 'x';
-      speedStatusEl.classList.add('hidden');
-      [playBtn, restartBtn, skipBackBtn, skipFwdBtn, speedSlider, gbBtn].forEach(el => el.disabled = false);
-      refreshSpeedApplyState();
-      isApplyingSpeed = false;
+      if (!superseded()) {
+        speedRun = null;
+        speedValueEl.textContent = sliderToRate().toFixed(1) + 'x';
+        speedStatusEl.classList.add('hidden');
+        transportBtns.forEach(el => el.disabled = false);
+        refreshSpeedApplyState();
+      }
     }
   }
 
@@ -2388,11 +2637,14 @@ function buildPracticeCard(stemFilesMap) {
 
   practicePlayer = {
     pause:   () => { if (ppPlaying) doPause(); },
-    seekBy:  delta => { if (duration && !isApplyingSpeed) doSeek(getPosition() + delta); },
+    // Arrow-key seeking follows the transport buttons: locked while a speed change's
+    // audio under the playhead is still on its way.
+    seekBy:  delta => { if (duration && track && !playBtn.disabled) doSeek(getPosition() + delta); },
     destroy: () => {
       if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
-      playGen++;
-      stems.forEach(stem => { try { sources[stem]?.stop(); } catch(_) {} });
+      speedRun?.abort.abort();
+      speedRun = null;
+      stopSources();
       if (ctx) { ctx.close().catch(() => {}); ctx = null; }
       practicePlayer = null;
     },
@@ -2409,7 +2661,7 @@ function buildPracticeCard(stemFilesMap) {
         gainNodes[stem].connect(ctx.destination);
       });
 
-      buffers = {};
+      track = makeTrack([0]);
       pristineBytes = {};
       let loadedCount = 0;
       timeEl.textContent = `Loading 0 / ${stems.length}…`;
@@ -2438,13 +2690,15 @@ function buildPracticeCard(stemFilesMap) {
       await Promise.all(stems.map(async stem => {
         const { bytes, buffer } = await fetchAndDecode(stemFilesMap[stem]);
         pristineBytes[stem] = bytes;
-        buffers[stem] = buffer;
+        track.bufs[stem][0] = buffer;
         loadedCount++;
         if (loadedCount < stems.length)
           timeEl.textContent = `Loading ${loadedCount} / ${stems.length}…`;
       }));
 
-      duration = buffers[stems[0]].duration;
+      track.ready[0] = true;
+      duration = track.bufs[stems[0]][0].duration;
+      settled = { track, duration, rate: 1 };
       timeEl.textContent = '0:00 / ' + fmt(duration);
       playBtn.disabled = false;
       restartBtn.disabled = false;
@@ -2822,7 +3076,7 @@ async function openResult(jobId, item = null, pushUrl = true) {
       }
       await showKaraokePlayer(data.files, chosenCandidate, artist, title, true);
     } else {
-      await showResults(data.files, true);
+      await showResults(data.files, true, jobId);
       shareUrlEl.value = `${location.origin}/result/${jobId}`;
       shareRow.classList.remove('hidden');
     }

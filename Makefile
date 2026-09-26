@@ -1,8 +1,8 @@
-.PHONY: setup sync run web deploy deploy-legacy deploy-cobalt clean help
+.PHONY: setup sync run web deploy deploy-legacy deploy-cobalt r2-setup clean help
 
 # Default target
 help:
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' Makefile | \
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' Makefile | \
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
 
 setup: ## Install all deps (creates .venv, installs web extras)
@@ -45,6 +45,15 @@ deploy-cobalt: ## Deploy the self-hosted Cobalt YouTube-extraction service (see 
 		--force
 	uv run modal deploy cobalt_app.py
 	@echo "Copy the COBALT_URL / COBALT_API_KEY above into .env for local dev (make web)."
+
+# Usage: make r2-setup [BUCKET=neiro]
+BUCKET ?= neiro
+
+# One-time bucket config. The app's R2 token is Object Read & Write (scoped to the bucket),
+# which can't change bucket settings, so this uses wrangler's own browser login instead.
+r2-setup: ## Configure the R2 bucket once (CORS + tmp/ expiry): make r2-setup [BUCKET=neiro]
+	npx wrangler r2 bucket cors set "$(BUCKET)" --file r2-cors.json --force
+	npx wrangler r2 bucket lifecycle add "$(BUCKET)" expire-unsaved-runs tmp/ --expire-days 1 --force
 
 clean: ## Remove .venv, __pycache__, output/
 	rm -rf .venv __pycache__ output/ out/

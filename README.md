@@ -106,11 +106,11 @@ make deploy              # builds and deploys to Modal; prints the public URL
 
 ---
 
-### 3 — R2 storage setup *(optional — shareable links)*
+### 3 — R2 storage setup *(optional — needed for the library and shareable links)*
 
-Without a storage bucket, separated stems only exist for the current page load. With one, every separation is staged server-side for 24 hours, and *Save to library* keeps it permanently under a shareable link anyone can open.
+Without a storage bucket, separated stems only exist for the current page load, and there is no library. With one, every separation is staged server-side for 24 hours, and *Save to library* keeps it permanently under a shareable link anyone can open.
 
-Neiro uses [Cloudflare R2](https://www.cloudflare.com/developer-platform/products/r2/) — an S3-compatible object store with no egress fees. Finished stems are written to your bucket by the server (under `tmp/`, auto-expired after a day by a lifecycle rule Neiro sets on startup); *Save to library* copies them to `results/` and returns a UUID-based URL — no audio is ever uploaded from the browser.
+Neiro uses [Cloudflare R2](https://www.cloudflare.com/developer-platform/products/r2/) — an S3-compatible object store with no egress fees. Finished stems are written to your bucket by the server (under `tmp/`, auto-expired after a day by a lifecycle rule — see step 6 below); *Save to library* copies them to `results/` and returns a UUID-based URL — no audio is ever uploaded from the browser.
 
 **Pricing:** **10 GB free storage per month**. Beyond that, $0.015 / GB / month, with no charges for data transfer out.
 
@@ -121,6 +121,15 @@ Neiro uses [Cloudflare R2](https://www.cloudflare.com/developer-platform/product
 3. Go to **R2 → Manage R2 API Tokens → Create API Token**.
 4. Grant **Object Read & Write** permissions scoped to your bucket.
 5. Note down: **Account ID**, **Access Key ID**, **Secret Access Key**.
+6. Configure the bucket once — pass your bucket's name if it isn't `neiro`:
+   ```bash
+   make r2-setup BUCKET=neiro
+   ```
+   This runs Cloudflare's `wrangler` CLI (via `npx`, so Node is required; it opens a browser to log in the first time) to set two things the app's token isn't allowed to change:
+   - a **CORS policy** ([`r2-cors.json`](r2-cors.json)) so the browser can fetch stems straight from R2 — without it, every stem load fails a few times with CORS errors and then falls back to a slower proxy through the server;
+   - a **lifecycle rule** deleting objects under `tmp/` a day after creation — without it, unsaved separations and speed-change renders accumulate in `tmp/` forever.
+
+   Why not just give the app a token that can do this itself? Changing bucket settings needs **Admin Read & Write**, which also lets the holder delete buckets and applies to every bucket in your Cloudflare account. The app keeps its token for every request, so it gets the narrow one; this one-time setup uses your own login instead.
 
 **Local (CPU) — `.env` file**
 
@@ -197,7 +206,7 @@ models/               Model checkpoints — downloaded automatically on first ru
 
 Pre-trained weights are downloaded automatically to `models/` on first use. Key model sources:
 
-- **6-stem BSRoformer** — [jarredou/BS-ROFO-SW-Fixed](https://huggingface.co/jarredou/BS-ROFO-SW-Fixed) on Hugging Face
+- **6-stem BSRoformer** — [jarredou/BS-ROFO-SW-Fixed](https://huggingface.co/jarredou/BS-ROFO-SW-Fixed) on Hugging Face (downloaded from the [enerjazzer/BS-ROFO-SW-Fixed](https://huggingface.co/enerjazzer/BS-ROFO-SW-Fixed) mirror, since the original is no longer public)
 - **MelBandRoformer** — [KimberleyJSN/melbandroformer](https://huggingface.co/KimberleyJSN/melbandroformer) on Hugging Face
 - **BSRoformer / InstVoc / MDX models** — [TRvlvr model repo](https://github.com/TRvlvr/model_repo)
 
