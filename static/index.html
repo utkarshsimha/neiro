@@ -1725,7 +1725,7 @@ function handleMessage(msg) {
     progBar.classList.remove('pulsing');
     progBar.style.width = '100%';
     stageSub.textContent = '';
-    showResults(msg.files, false, msg.job_id);
+    showResults(msg.files, false, msg.job_id, msg.frame_index);
   } else if (msg.type === 'error') {
     showError(msg.message);
   }
@@ -1803,7 +1803,9 @@ const PRACTICE_STEMS = ['vocals','bass','drums','guitar','piano','other'];
 // (`jobId` set — Save then just promotes that job), or {name: base64} when the server couldn't
 // stage it (R2 unconfigured/failed), in which case there's nothing to save. For a saved/shared
 // result `jobId` is its library id (used only to let /api/speed read the stems from R2).
-async function showResults(files, fromShare = false, jobId = null) {
+// `frameIndex` is the stems' frame index (see neiro_common.build_frame_index), if they have
+// one: the practice player then fetches 1.0x audio as byte ranges of them.
+async function showResults(files, fromShare = false, jobId = null, frameIndex = null) {
   const filesAreUrls = fromShare || !!jobId;
   blobUrls.forEach(u => URL.revokeObjectURL(u));
   blobUrls = [];
@@ -1871,7 +1873,11 @@ async function showResults(files, fromShare = false, jobId = null) {
     const r2Source = jobId
       ? { prefix: `${fromShare ? 'results' : 'tmp'}/${jobId}`, files: stemNames }
       : null;
-    const pc = buildPracticeCard(stemFiles, r2Source);
+    const indexed = name => frameIndex.bytes[name] && frameIndex.urls[name];
+    const rangeSource = frameIndex && Object.values(stemNames).every(indexed)
+      ? { index: frameIndex, names: stemNames }
+      : null;
+    const pc = buildPracticeCard(stemFiles, r2Source, rangeSource);
     practiceMount.appendChild(pc);
     stemsDetails.classList.remove('hidden');
   } else {
@@ -1981,8 +1987,9 @@ function stallThresholdBytes(windowMs) {
 
 class FetchStall extends Error {}
 
-// `signal` aborts the download (and skips any remaining retries).
-async function fetchStemBytes(url, { signal } = {}) {
+// `signal` aborts the download (and skips any remaining retries). `range` ([start, end)
+// byte offsets) fetches just that part of the file — see the practice player's frame index.
+async function fetchStemBytes(url, { signal, range } = {}) {
   // With `stallMs`, abort when the last `stallMs` brought too little data (see
   // stallThresholdBytes) — progress-based rather than a total timeout, so big files on
   // slow connections are fine as long as bytes keep coming at a reasonable rate.
@@ -2005,9 +2012,11 @@ async function fetchStemBytes(url, { signal } = {}) {
       }, 500);
     }
     try {
-      const r = await fetch(u, { signal: ctl.signal });
+      const headers = range ? { Range: `bytes=${range[0]}-${range[1] - 1}` } : undefined;
+      const r = await fetch(u, { signal: ctl.signal, headers });
       const tHeaders = performance.now();
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (range && r.status !== 206) throw new Error(`asked for a byte range, got HTTP ${r.status}`);
       arrivals.push([tHeaders, 0]);
       const reader = r.body.getReader();
       const parts = [];
@@ -2038,7 +2047,7 @@ async function fetchStemBytes(url, { signal } = {}) {
     try {
       return await tryFetch(url, FETCH_STALL_MS);
     } catch (e) {
-      if (signal?.aborted) throw e;
+      if (signal?.aborted || (range && attempt === 2)) throw e;  // the proxy doesn't do ranges
       // A stall already waited long enough; other failures (e.g. CORS right after a cold
       // deploy) get a moment before trying again.
       if (attempt < 2 && !(e instanceof FetchStall)) await new Promise(r => setTimeout(r, 1500));
@@ -2129,7 +2138,9 @@ function buildZip(entries) {
 
 // `r2Source` ({prefix, files: {stem: filename}}) says where the stems are in R2, so speed
 // changes can have the server read them there instead of re-uploading; null if they aren't.
-function buildPracticeCard(stemFilesMap, r2Source = null) {
+// `rangeSource` ({index: frame index, names: {stem: filename}}) lets the 1.0x audio be
+// fetched as byte ranges of the stems (see applySpeed); null to download them whole.
+function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
   const STEM_ORDER = ['vocals','bass','drums','guitar','piano','other'];
   const stems = STEM_ORDER.filter(s => stemFilesMap[s]);
 
@@ -2242,13 +2253,23 @@ function buildPracticeCard(stemFilesMap, r2Source = null) {
   // Web Audio state (populated after async load)
   let ctx = null;
   let gainNodes = null;
-  // The loaded audio, as a timeline of segments with one AudioBuffer per stem each. The
-  // initial load is a single segment; a speed change streams in ~30s segments (see
-  // applySpeed), so until it finishes some are still missing — playback then waits
-  // ("buffering") at the first missing one and carries on when it arrives.
-  let track = null;          // { starts: [seconds], bufs: {stem: [AudioBuffer|null]}, ready: [bool] }
-  let pristineBytes = null;  // original (rate=1) compressed stem bytes, kept so re-applying
-                             // speed always starts fresh instead of compounding re-stretches
+  // The loaded audio at one speed, as a timeline of segments: each stem's segment is kept
+  // compressed (`enc`, as it arrived) and decoded (`bufs`) only while it's near the playhead
+  // — see ensureWindow. Decoded, a 21-minute, 6-stem track is ~3.3 GB; compressed it's
+  // ~250 MB. A speed change's audio (streamed by the server) and the initial load (byte
+  // ranges of the stems) arrive in ~30s segments — see applySpeed — so until they finish
+  // some are still missing: playback then waits ("buffering") at the first one that isn't
+  // ready and carries on when it is. Stems downloaded whole (see loadWhole) are a single
+  // segment.
+  //   { rate, starts: [seconds], duration,
+  //     enc:  {stem: [{bytes: ArrayBuffer, pre: seconds | null} | null]}  (see trimSegment)
+  //     bufs: {stem: [AudioBuffer | null]}, ready: [bool]  (decoded for every stem)
+  //     decoding: Set<segment>, onPlayable: fn | null }
+  let track = null;
+  let pristineTrack = null;  // the complete 1.0x track, kept (compressed) after switching speed
+                             // so going back to 1.0x is decoded locally, with no server
+  let pristineBytes = null;  // the whole stems' bytes, if downloaded whole (see loadWhole) —
+                             // speed changes upload them when the stems aren't in R2
   let currentRate = 1;
   let sources = [];          // every AudioBufferSourceNode scheduled for the current play
   let scheduled = new Set(); // segment indices scheduled for the current play
@@ -2258,16 +2279,92 @@ function buildPracticeCard(stemFilesMap, r2Source = null) {
   let playCtxTime = 0;       // ctx.currentTime at which position `startOffset` plays
   let duration = 0;
   let rafId = null;
+  let awaitingFirstAudio = true;  // the time display says it's loading until something can play
 
-  function makeTrack(starts) {
-    return { starts, ready: starts.map(() => false),
-             bufs: Object.fromEntries(stems.map(s => [s, starts.map(() => null)])) };
+  function makeTrack(rate, starts, duration) {
+    const perStem = () => Object.fromEntries(stems.map(s => [s, starts.map(() => null)]));
+    return { rate, starts, duration, enc: perStem(), bufs: perStem(),
+             ready: starts.map(() => false), decoding: new Set(), onPlayable: null };
   }
   function segEnd(j) { return j + 1 < track.starts.length ? track.starts[j + 1] : duration; }
-  function segAt(t) {
+  function segLength(t, j) {
+    return (j + 1 < t.starts.length ? t.starts[j + 1] : t.duration) - t.starts[j];
+  }
+  function allArrived(t) { return t.starts.every((_, j) => stems.every(s => t.enc[s][j])); }
+
+  // A segment's compressed audio can decode to more than the segment itself — `pre`
+  // seconds before it (a byte range's warm-up frames, say), and some after. Keep `len`
+  // seconds starting `pre` in. (`pre` null: the buffer is exactly the segment.)
+  function trimSegment(buf, pre, len) {
+    const from = Math.round(pre * buf.sampleRate);
+    const rate = buf.sampleRate, out = ctx.createBuffer(buf.numberOfChannels, Math.round(len * rate), rate);
+    for (let c = 0; c < buf.numberOfChannels; c++)
+      out.copyToChannel(buf.getChannelData(c).subarray(from, from + out.length), c);
+    return out;
+  }
+  function segIndexAt(starts, t) {
     let j = 0;
-    while (j + 1 < track.starts.length && track.starts[j + 1] <= t) j++;
+    while (j + 1 < starts.length && starts[j + 1] <= t) j++;
     return j;
+  }
+  function segAt(t) { return segIndexAt(track.starts, t); }
+
+  // Decoded, only the segment under the playhead, the next (decoded while this one plays,
+  // so it's ready by the seam) and the previous (for short seeks back) are kept. Anything
+  // further is decoded on demand when the playhead gets there: seeking far away waits (⏳)
+  // for one segment's decode, ~0.5s for six stems on a laptop.
+  function windowAround(t, j) { return [j, j + 1, j - 1].filter(k => k >= 0 && k < t.starts.length); }
+  function dropDecoded(t, j) { stems.forEach(s => { t.bufs[s][j] = null; }); t.ready[j] = false; }
+
+  function ensureWindow() {
+    const t = track;
+    if (!t || !ctx) return;
+    const want = windowAround(t, segIndexAt(t.starts, getPosition()));
+    // Sources already scheduled keep their own reference to a dropped buffer until they end.
+    t.starts.forEach((_, j) => { if (t.ready[j] && !want.includes(j)) dropDecoded(t, j); });
+    want.forEach(j => decodeSegment(t, j));
+  }
+
+  // Decode segment j of every stem (if it has arrived and isn't decoded or decoding yet).
+  async function decodeSegment(t, j) {
+    if (t.ready[j] || t.decoding.has(j) || !stems.every(s => t.enc[s][j])) return;
+    t.decoding.add(j);
+    try {
+      const bufs = await Promise.all(stems.map(async s => {
+        const { bytes, pre } = t.enc[s][j];
+        // decodeAudioData may detach its input, so decode a copy and keep the original.
+        const buf = await ctx.decodeAudioData(bytes.slice(0));
+        return pre === null ? buf : trimSegment(buf, pre, segLength(t, j));
+      }));
+      // Swapped out, or the playhead moved on, while this was decoding: don't keep it.
+      if (t !== track || !windowAround(t, segAt(getPosition())).includes(j)) return;
+      stems.forEach((s, i) => { t.bufs[s][j] = bufs[i]; });
+      t.ready[j] = true;
+      if (t.onPlayable && t.ready[segAt(startOffset)]) {
+        const onPlayable = t.onPlayable;
+        t.onPlayable = null;
+        onPlayable();
+      }
+      onSegmentReady(j);
+    } catch (e) {
+      console.error(`Decoding segment ${j} failed:`, e);
+      // Don't leave playback waiting (⏳) for audio that isn't coming.
+      if (t === track && waitingToPlay && segAt(startOffset) === j) {
+        setWaiting(false);
+        alert('Could not decode this part of the track: ' + e.message);
+      }
+    } finally {
+      t.decoding.delete(j);
+    }
+  }
+
+  // Make `t` the loaded audio (the playhead's position set by the caller), dropping the
+  // decoded audio of the one it replaces — which keeps its compressed segments.
+  function setTrack(t) {
+    if (track && track !== t) track.starts.forEach((_, j) => dropDecoded(track, j));
+    track = t;
+    duration = t.duration;
+    currentRate = t.rate;
   }
 
   function computedVol(stem) {
@@ -2308,6 +2405,8 @@ function buildPracticeCard(stemFilesMap, r2Source = null) {
       src.connect(gainNodes[stem]);
       if (s >= startOffset) src.start(playCtxTime + (s - startOffset));
       else src.start(playCtxTime, startOffset - s);  // the segment we're starting inside
+      // Let go of it once played, so its buffer can be freed after ensureWindow drops it.
+      src.onended = () => { const i = sources.indexOf(src); if (i >= 0) sources.splice(i, 1); };
       sources.push(src);
     });
   }
@@ -2326,7 +2425,11 @@ function buildPracticeCard(stemFilesMap, r2Source = null) {
       if (b) { b.textContent = '▶'; b.classList.remove('playing'); }
     });
     if (ctx.state === 'suspended') ctx.resume();
-    if (!track.ready[segAt(startOffset)]) { setWaiting(true); return; }  // resumed by onSegmentReady
+    if (!track.ready[segAt(startOffset)]) {  // resumed by onSegmentReady
+      setWaiting(true);
+      ensureWindow();
+      return;
+    }
     stopSources();
     playCtxTime = ctx.currentTime + 0.05;   // schedule 50 ms ahead — all stems start at identical ctx time
     track.starts.forEach((_, j) => { if (track.ready[j] && segEnd(j) > startOffset) scheduleSegment(j); });
@@ -2349,10 +2452,11 @@ function buildPracticeCard(stemFilesMap, r2Source = null) {
     const was = ppPlaying || waitingToPlay;
     if (ppPlaying) { stopSources(); ppPlaying = false; }
     startOffset = Math.max(0, Math.min(t, duration));
+    ensureWindow();
     if (was) doPlay();
   }
 
-  // A segment of a streamed speed change has arrived for every stem.
+  // Segment j has been decoded for every stem.
   function onSegmentReady(j) {
     if (ppPlaying && !scheduled.has(j) && track.starts[j] > getPosition() + 0.05) scheduleSegment(j);
     if (waitingToPlay && track.ready[segAt(startOffset)]) doPlay();
@@ -2368,7 +2472,7 @@ function buildPracticeCard(stemFilesMap, r2Source = null) {
     const pct = (t / duration) * 100;
     seekFill.style.width = pct + '%';
     seekThumb.style.left = pct + '%';
-    timeEl.textContent = fmt(t) + ' / ' + fmt(duration);
+    if (!awaitingFirstAudio) timeEl.textContent = fmt(t) + ' / ' + fmt(duration);
   }
   function positionTooltip(clientX, t) {
     const r = seekWrap.getBoundingClientRect();
@@ -2397,12 +2501,15 @@ function buildPracticeCard(stemFilesMap, r2Source = null) {
   });
 
   // RAF ticker — position display driven by AudioContext clock (no polling audio elements).
-  // It also ends playback at the end of the track, and stalls it (then onSegmentReady
-  // resumes) when it reaches a segment of a streamed speed change that hasn't arrived yet.
+  // It also ends playback at the end of the track, stalls it (then onSegmentReady resumes)
+  // when it reaches a segment that isn't ready yet, and moves the decode window along
+  // (ensureWindow) as the playhead crosses into each new segment.
+  let windowSeg = -1;
   function startTicker() {
     function tick() {
       if (ppPlaying) {
         const p = getPosition();
+        if (segAt(p) !== windowSeg) { windowSeg = segAt(p); ensureWindow(); }
         if (p >= duration - 0.01) {
           stopSources(); ppPlaying = false; startOffset = 0;
           speedSlider.disabled = false;
@@ -2412,7 +2519,7 @@ function buildPracticeCard(stemFilesMap, r2Source = null) {
           setWaiting(true);
         }
       }
-      if (!seekDragging && duration) {
+      if (!seekDragging && duration && !awaitingFirstAudio) {
         const p = getPosition();
         const pct = (p / duration) * 100;
         seekFill.style.width = pct + '%';
@@ -2459,13 +2566,14 @@ function buildPracticeCard(stemFilesMap, r2Source = null) {
   // compounding re-stretches of an already-stretched buffer. The server streams the
   // result back in ~30s segments, the one under the playhead first (see /api/speed), so
   // playback can start as soon as that segment has arrived for every stem while the rest
-  // keep loading. Going back to 1.0x needs no server at all: it's the pristine audio.
+  // keep loading. Going back to 1.0x needs no server at all: it's decoded locally from the
+  // pristine audio (the whole stems, or the 1.0x track's byte-range segments).
   //
   // The speed controls stay usable while segments are still loading: applying another
   // speed aborts the in-flight one (dropping the request makes the server stop its
   // stretch too — see /api/speed) and starts over from the same point in the song.
   let speedRun = null;       // the in-flight speed change: { rate, abort: AbortController }
-  let settled = null;        // the last fully-loaded audio { track, duration, rate } — restored on failure
+  let settled = null;        // the last fully-arrived track — restored if a speed change fails
   const transportBtns = [playBtn, restartBtn, skipBackBtn, skipFwdBtn];
 
   // Run `fn`s (returning promises) at most `n` at a time, in the order they were queued.
@@ -2492,6 +2600,8 @@ function buildPracticeCard(stemFilesMap, r2Source = null) {
     // (no R2, or the staged copy expired → 404) upload the pristine bytes instead.
     let resp = r2Source ? await postSpeed({ source: r2Source }) : null;
     if (!resp || resp.status === 404) {
+      // Loaded as byte ranges, not downloaded whole, so there's nothing local to upload.
+      if (!pristineBytes) throw new Error('the stems are no longer in storage');
       const filesB64 = {};
       stems.forEach(stem => { filesB64[stem] = arrayBufferToBase64(pristineBytes[stem]); });
       resp = await postSpeed({ files: filesB64 });
@@ -2500,97 +2610,163 @@ function buildPracticeCard(stemFilesMap, r2Source = null) {
     return resp;
   }
 
-  async function applySpeed(rate) {
-    if (ppPlaying || rate === (speedRun ? speedRun.rate : currentRate)) return;
-    speedRun?.abort.abort();  // superseded: it bows out quietly (see `superseded` below)
-    const run = speedRun = { rate, abort: new AbortController() };
-    const superseded = () => speedRun !== run;
-    // Until the new timeline arrives there's nothing to play; the speed controls stay live.
-    transportBtns.forEach(el => el.disabled = true);
-    speedStatusEl.classList.remove('hidden');
-    refreshSpeedApplyState();
-    setWaiting(false);
-    const fraction = duration ? startOffset / duration : 0;
-    // Switch to the new (possibly still empty) timeline, keeping the playhead at the
-    // same point in the song, so segments have somewhere to land as they arrive...
-    const swapIn = (newTrack, newDuration) => {
-      track = newTrack; duration = newDuration; startOffset = fraction * duration;
-      currentRate = rate;
-      showT(startOffset);
+  // Downloads, at most 8 at a time in the order they're added; done() waits for them all
+  // and rejects with the first failure.
+  function makeDownloads() {
+    const limit = makeLimiter(8), loads = [];
+    return {
+      add(fn) {
+        const load = limit(fn);
+        load.catch(() => {});  // surfaced by done()
+        loads.push(load);
+      },
+      done: () => Promise.all(loads),
     };
-    // ...but keep the transport locked (and "Applying…" up) until the audio under the
-    // playhead has arrived for every stem, so pressing play always plays right away.
-    const unlock = () => {
-      if (superseded()) return;
-      transportBtns.forEach(el => el.disabled = false);
-      speedStatusEl.classList.add('hidden');
-    };
-    try {
-      if (rate === 1) {
-        const t = makeTrack([0]);
-        await Promise.all(stems.map(async stem => {
-          t.bufs[stem][0] = await ctx.decodeAudioData(pristineBytes[stem].slice(0));
-        }));
-        if (superseded()) return;
-        t.ready[0] = true;
-        swapIn(t, t.bufs[stems[0]][0].duration);
-        unlock();
-      } else {
-        const resp = await startSpeedStream(rate, fraction, run.abort.signal);
-        const limit = makeLimiter(8);
-        const loads = [];
-        let t = null, firstSeg = 0;  // firstSeg: the segment under the playhead
-        const loadSegment = async ev => {
-          if (superseded()) return;  // don't spend bandwidth on a speed that's been replaced
+  }
+
+  // A speed change's audio, streamed by the server (see /api/speed): the new timeline, then
+  // each stem's ~30s segments as they're ready, the one under the playhead first. Resolves
+  // with the track once every segment has arrived (or once `run` is superseded).
+  async function streamTrack(rate, fraction, run, swapIn) {
+    const downloads = makeDownloads();
+    let t = null;
+    const resp = await startSpeedStream(rate, fraction, run.abort.signal);
+    for await (const ev of readSSE(resp.body)) {
+      if (ev.type === 'meta') {
+        t = makeTrack(rate, ev.segments, ev.duration);
+        swapIn(t);
+      } else if (ev.type === 'segment') {
+        downloads.add(async () => {
+          if (speedRun !== run) return;  // don't spend bandwidth on a speed that's been replaced
           const bytes = ev.url
             ? (await fetchStemBytes(ev.url, { signal: run.abort.signal })).buffer
             // Decoding base64 via a data: URL is native — ~3x faster than a per-byte JS loop,
             // and off the main thread, which matters with dozens of multi-MB segments.
             : await (await fetch('data:application/octet-stream;base64,' + ev.b64)).arrayBuffer();
-          t.bufs[ev.stem][ev.index] = await ctx.decodeAudioData(bytes);
-          if (stems.every(s => t.bufs[s][ev.index])) {
-            t.ready[ev.index] = true;
-            if (ev.index === firstSeg && t === track) unlock();
-            if (t === track) onSegmentReady(ev.index);
-          }
-        };
-        for await (const ev of readSSE(resp.body)) {
-          if (ev.type === 'meta') {
-            t = makeTrack(ev.segments);
-            firstSeg = ev.first;
-            swapIn(t, ev.duration);
-          } else if (ev.type === 'segment') {
-            const load = limit(() => loadSegment(ev));
-            load.catch(() => {});  // surfaced by the Promise.all below, once the stream ends
-            loads.push(load);
-          } else if (ev.type === 'error') {
-            throw new Error(ev.message);
-          }
-        }
-        await Promise.all(loads);
-        if (superseded()) return;
-        if (!t || !t.ready.every(Boolean)) throw new Error('the stream ended before every segment arrived');
+          t.enc[ev.stem][ev.index] = { bytes, pre: ev.pre ?? null };  // null: no margins
+          if (t === track) ensureWindow();  // decodes it if it's near the playhead
+        });
+      } else if (ev.type === 'error') {
+        throw new Error(ev.message);
       }
-      settled = { track, duration, rate };
+    }
+    await downloads.done();
+    return t;
+  }
+
+  // The 1.0x audio straight from the original stems: each segment is a byte range of them,
+  // fetched from R2 with a few warm-up frames in front — no server work at all (see
+  // neiro_common.build_frame_index). Sample s of a decoded range starting at frame f is
+  // track sample f × spf + s − delay, so trimming is exact arithmetic. Resolves with the
+  // track once every segment has arrived (or once `run` is superseded).
+  async function loadRanges(run, swapIn) {
+    const ix = rangeSource.index, sr = ix.sample_rate, spf = ix.samples_per_frame;
+    const trackStart = seg => seg.start === 0 ? 0 : seg.start * spf - ix.delay;
+    const t = makeTrack(1, ix.segments.map(seg => trackStart(seg) / sr), ix.length / sr);
+    swapIn(t);
+    const first = segAt(startOffset), all = [...t.starts.keys()];
+    const order = all.slice(first).concat(all.slice(0, first).reverse());  // playhead first
+    const downloads = makeDownloads();
+    for (const j of order) for (const stem of stems) {
+      const name = rangeSource.names[stem], seg = ix.segments[j];
+      const pre = (trackStart(seg) - (seg.first * spf - ix.delay)) / sr;
+      downloads.add(async () => {
+        if (speedRun !== run) return;
+        const range = ix.bytes[name][j];
+        const bytes = (await fetchStemBytes(ix.urls[name], { signal: run.abort.signal, range })).buffer;
+        t.enc[stem][j] = { bytes, pre };
+        if (t === track) ensureWindow();  // decodes it if it's near the playhead
+      });
+    }
+    await downloads.done();
+    return t;
+  }
+
+  // `initial`: this is the track's first load (at 1.0x, as byte ranges of the stems — see the
+  // end of buildPracticeCard), so there's no loaded audio yet to fall back on if it fails.
+  async function applySpeed(rate, { initial = false } = {}) {
+    if (!initial && (ppPlaying || rate === (speedRun ? speedRun.rate : currentRate))) return;
+    speedRun?.abort.abort();  // superseded: it bows out quietly (see `superseded` below)
+    const run = speedRun = { rate, abort: new AbortController() };
+    const superseded = () => speedRun !== run;
+    // Until the new timeline arrives there's nothing to play; the speed controls stay live.
+    transportBtns.forEach(el => el.disabled = true);
+    // The initial load's progress shows in the time display instead (awaitingFirstAudio).
+    if (!initial) speedStatusEl.classList.remove('hidden');
+    refreshSpeedApplyState();
+    setWaiting(false);
+    const fraction = duration ? startOffset / duration : 0;
+    // Keep the transport locked (and "Applying…" up) until the audio under the playhead is
+    // ready for every stem, so pressing play always plays right away.
+    const unlock = () => {
+      if (superseded()) return;
+      transportBtns.forEach(el => el.disabled = false);
+      enableControls();
+      speedStatusEl.classList.add('hidden');
+      awaitingFirstAudio = false;
+      showT(startOffset);
+    };
+    // Switch to the new (possibly still empty) timeline, keeping the playhead at the same
+    // point in the song, so segments have somewhere to land as they arrive.
+    const swapIn = t => {
+      setTrack(t);
+      startOffset = fraction * duration;
+      showT(startOffset);
+      t.onPlayable = unlock;
+      ensureWindow();
+    };
+    try {
+      if (rate === 1 && pristineTrack) {
+        // Back to 1.0x: it's all here, compressed, so it's just decoded around the playhead
+        // (~0.5s) — no server.
+        swapIn(pristineTrack);
+      } else {
+        const t = rate === 1 && rangeSource
+          ? await loadRanges(run, swapIn)
+          : await streamTrack(rate, fraction, run, swapIn);
+        if (superseded()) return;
+        if (!t || !allArrived(t)) throw new Error('not every segment arrived');
+        if (rate === 1) pristineTrack = t;
+      }
+      settled = track;
     } catch (e) {
       if (superseded()) return;  // aborted by a newer speed change, which now owns the UI
-      console.error('Speed change failed:', e);
-      alert('Could not change speed: ' + e.message);
-      // Put back the last fully-loaded audio, at the same point in the song.
       if (ppPlaying) { stopSources(); ppPlaying = false; }
       setWaiting(false);
       playBtn.classList.remove('playing');
-      ({ track, duration } = settled);
-      currentRate = settled.rate;
-      startOffset = fraction * duration;
-      showT(startOffset);
+      if (!initial) {
+        console.error('Speed change failed:', e);
+        alert('Could not change speed: ' + e.message);
+      }
+      if (settled) {
+        // Put back the last fully-arrived audio, at the same point in the song.
+        setTrack(settled);
+        startOffset = fraction * duration;
+        showT(startOffset);
+        ensureWindow();
+      } else {
+        // Nothing has fully loaded yet (the initial load failed, or a speed change replaced
+        // it before it finished), so fall back to downloading the stems whole.
+        console.warn('Loading the stems in segments failed; downloading them whole instead:', e);
+        transportBtns.forEach(el => el.disabled = true);
+        speedStatusEl.classList.add('hidden');
+        awaitingFirstAudio = true;  // loadWhole's progress goes in the time display
+        try {
+          await loadWhole(fraction, superseded);
+        } catch (e2) {
+          if (superseded()) return;
+          console.error('Practice mode load error:', e2);
+          timeEl.textContent = 'Error loading audio';
+        }
+      }
       setSliderToRate(currentRate); // revert the slider to the last successfully-applied rate
     } finally {
       if (!superseded()) {
         speedRun = null;
         speedValueEl.textContent = sliderToRate().toFixed(1) + 'x';
         speedStatusEl.classList.add('hidden');
-        transportBtns.forEach(el => el.disabled = false);
+        // Left locked only if there's still nothing playable (the fallback failed too).
+        transportBtns.forEach(el => el.disabled = !settled);
         refreshSpeedApplyState();
       }
     }
@@ -2650,64 +2826,92 @@ function buildPracticeCard(stemFilesMap, r2Source = null) {
     },
   };
 
-  // ── Async: fetch + decode all stems, then enable transport ─────────────────
+  // Everything besides the transport buttons that waits for the first playable audio.
+  function enableControls() {
+    speedSlider.disabled = ppPlaying;
+    gbBtn.disabled = false;
+    seekWrap.style.pointerEvents = '';
+  }
+
+  // Download every stem whole and decode it, as the 1.0x track (a single segment, so it's
+  // decoded whole — no decode window) — the initial load when the stems have no frame index
+  // (e.g. aren't in R2), and the fallback when loading them as byte ranges fails. Keeps the
+  // compressed bytes as `pristineBytes`.
+  // Starts at `fraction` of the way through; if `stale()` by the time it's done (a speed
+  // change took over), it leaves the player alone.
+  async function loadWhole(fraction = 0, stale = () => false) {
+    const t = makeTrack(1, [0], 0);
+    const bytesByStem = {};
+    let loadedCount = 0;
+    timeEl.textContent = `Loading 0 / ${stems.length}…`;
+
+    async function fetchAndDecode(url) {
+      async function tryFetch(u) {
+        const r = await fetch(u);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const bytes = await r.arrayBuffer();
+        // decodeAudioData may detach/transfer its input in some engines — decode a
+        // copy so `bytes` stays valid for re-sending to /api/speed later.
+        return { bytes, buffer: await ctx.decodeAudioData(bytes.slice(0)) };
+      }
+      if (url.startsWith('blob:')) return tryFetch(url);
+      // Try direct R2 up to 3 times (CORS config may take a few seconds to propagate after a cold deploy)
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          return await tryFetch(url);
+        } catch (_) {
+          if (attempt < 2) await new Promise(r => setTimeout(r, 1500));
+        }
+      }
+      return tryFetch(`/api/audio-proxy?url=${encodeURIComponent(url)}`); // proxy fallback
+    }
+
+    await Promise.all(stems.map(async stem => {
+      const { bytes, buffer } = await fetchAndDecode(stemFilesMap[stem]);
+      bytesByStem[stem] = bytes;
+      t.enc[stem][0] = { bytes, pre: null };
+      t.bufs[stem][0] = buffer;
+      loadedCount++;
+      if (loadedCount < stems.length && !stale())
+        timeEl.textContent = `Loading ${loadedCount} / ${stems.length}…`;
+    }));
+    if (stale()) return;
+
+    t.ready[0] = true;
+    t.duration = t.bufs[stems[0]][0].duration;
+    pristineBytes = bytesByStem;
+    pristineTrack = t;
+    setTrack(t);
+    startOffset = fraction * duration;
+    settled = t;
+    awaitingFirstAudio = false;
+    showT(startOffset);
+    enableControls();
+  }
+
+  // ── Async: load the stems, then enable transport ───────────────────────────
+  // Stems with a frame index (in R2) are loaded as byte ranges in ~30s segments, the
+  // playhead's first, so playback can begin as soon as the first segment of every stem is
+  // in instead of after every stem has downloaded whole. (applySpeed falls back to
+  // loadWhole — the only way otherwise — if that fails.)
   (async () => {
     try {
-      ctx = new AudioContext();
+      // At the stems' own rate, byte-range segments decode sample-exact, with nothing
+      // resampled until playback.
+      ctx = new AudioContext(rangeSource ? { sampleRate: rangeSource.index.sample_rate } : undefined);
       gainNodes = {};
       stems.forEach(stem => {
         gainNodes[stem] = ctx.createGain();
         gainNodes[stem].gain.value = 1;
         gainNodes[stem].connect(ctx.destination);
       });
-
-      track = makeTrack([0]);
-      pristineBytes = {};
-      let loadedCount = 0;
-      timeEl.textContent = `Loading 0 / ${stems.length}…`;
-
-      async function fetchAndDecode(url) {
-        async function tryFetch(u) {
-          const r = await fetch(u);
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          const bytes = await r.arrayBuffer();
-          // decodeAudioData may detach/transfer its input in some engines — decode a
-          // copy so `bytes` stays valid for re-sending to /api/speed later.
-          return { bytes, buffer: await ctx.decodeAudioData(bytes.slice(0)) };
-        }
-        if (url.startsWith('blob:')) return tryFetch(url);
-        // Try direct R2 up to 3 times (CORS config may take a few seconds to propagate after a cold deploy)
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            return await tryFetch(url);
-          } catch (_) {
-            if (attempt < 2) await new Promise(r => setTimeout(r, 1500));
-          }
-        }
-        return tryFetch(`/api/audio-proxy?url=${encodeURIComponent(url)}`); // proxy fallback
-      }
-
-      await Promise.all(stems.map(async stem => {
-        const { bytes, buffer } = await fetchAndDecode(stemFilesMap[stem]);
-        pristineBytes[stem] = bytes;
-        track.bufs[stem][0] = buffer;
-        loadedCount++;
-        if (loadedCount < stems.length)
-          timeEl.textContent = `Loading ${loadedCount} / ${stems.length}…`;
-      }));
-
-      track.ready[0] = true;
-      duration = track.bufs[stems[0]][0].duration;
-      settled = { track, duration, rate: 1 };
-      timeEl.textContent = '0:00 / ' + fmt(duration);
-      playBtn.disabled = false;
-      restartBtn.disabled = false;
-      skipBackBtn.disabled = false;
-      skipFwdBtn.disabled = false;
-      speedSlider.disabled = false;
-      gbBtn.disabled = false;
-      seekWrap.style.pointerEvents = '';
       startTicker();
+      if (rangeSource) {
+        await applySpeed(1, { initial: true });
+      } else {
+        await loadWhole();
+        transportBtns.forEach(el => el.disabled = false);
+      }
     } catch(e) {
       timeEl.textContent = 'Error loading audio';
       console.error('Practice mode load error:', e);
@@ -3076,7 +3280,7 @@ async function openResult(jobId, item = null, pushUrl = true) {
       }
       await showKaraokePlayer(data.files, chosenCandidate, artist, title, true);
     } else {
-      await showResults(data.files, true, jobId);
+      await showResults(data.files, true, jobId, data.frame_index);
       shareUrlEl.value = `${location.origin}/result/${jobId}`;
       shareRow.classList.remove('hidden');
     }

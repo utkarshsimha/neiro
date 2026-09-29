@@ -31,9 +31,9 @@ from fastapi.staticfiles import StaticFiles
 
 from neiro_common import (
     DEFAULTS, INDEX_HEADERS, JOB_ID_RE, SPEED_FILE_RE, SPEED_SOURCE_RE, STAGED_PREFIX, STEM_NAME_RE,
-    clean_yt_title, delete_job, download_yt, finalize_outputs, get_r2, inline_segment_deliverer,
-    list_library, queue_to_sse, r2_configured, r2_segment_deliverer, run_speed_stream, save_staged,
-    update_manifest, yt_url_ok,
+    clean_yt_title, delete_job, download_yt, ensure_frame_index, finalize_outputs, get_r2,
+    inline_segment_deliverer, list_library, queue_to_sse, r2_configured, r2_segment_deliverer,
+    run_speed_stream, save_staged, update_manifest, yt_url_ok,
 )
 
 # (audio_bytes, options) -> async iterator of {type: log|progress|result|error} messages
@@ -137,8 +137,16 @@ def build_app(static_dir: str, gpu_separate: GpuSeparate, cpu_separate: CpuSepar
             )
             for fname in manifest["files"]
         }
+        try:  # the practice player's frame index; built on first use for older results
+            frame_index = await asyncio.get_running_loop().run_in_executor(
+                None, ensure_frame_index, f"results/{job_id}", manifest["files"])
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            frame_index = None  # the player downloads the stems whole instead
         return {
             "files": urls,
+            "frame_index": frame_index,
             "mode": manifest.get("mode") or ("karaoke" if len(manifest["files"]) <= 2 else "practice"),
             "title": manifest.get("title"),
             "artist": manifest.get("artist"),
