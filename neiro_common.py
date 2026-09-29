@@ -227,6 +227,18 @@ def stage_to_r2(paths: dict[str, str]) -> dict:
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(put, paths.items()))
+    # The practice player's frame index (see build_frame_index), while the stems are at hand.
+    frame_index = None
+    stems = practice_mp3s(paths)
+    if len(stems) >= 3:
+        try:
+            index = build_frame_index({n: open(paths[n], "rb").read() for n in stems})
+            r2.put_object(Bucket=bucket, Key=f"{STAGED_PREFIX}/{job_id}/{FRAME_INDEX}",
+                          Body=json.dumps(index).encode(), ContentType="application/json")
+            frame_index = frames_for_client(r2, bucket, f"{STAGED_PREFIX}/{job_id}", index)
+        except Exception:
+            import traceback
+            traceback.print_exc()  # the player downloads the stems whole instead
     urls = {
         name: r2.generate_presigned_url(
             "get_object",
@@ -236,7 +248,7 @@ def stage_to_r2(paths: dict[str, str]) -> dict:
             ExpiresIn=86400)
         for name in paths
     }
-    return {"type": "done", "job_id": job_id, "files": urls}
+    return {"type": "done", "job_id": job_id, "files": urls, "frame_index": frame_index}
 
 
 def deliver_outputs(paths: dict[str, str]) -> dict:
@@ -276,7 +288,8 @@ def save_staged(job_id: str, mode: str | None, title: str | None, artist: str | 
     for name in names:
         r2.copy_object(Bucket=bucket, Key=f"results/{job_id}/{name}",
                        CopySource={"Bucket": bucket, "Key": src + name})
-    write_manifest(job_id, names, mode, title, artist)
+    stems = [n for n in names if n != FRAME_INDEX]  # the frame index isn't a stem
+    write_manifest(job_id, stems, mode, title, artist)
 
 
 def write_manifest(
@@ -358,6 +371,164 @@ def delete_job(job_id: str) -> None:
         keys = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
         if keys:
             r2.delete_objects(Bucket=bucket, Delete={"Objects": keys})
+
+
+# ── Frame index: 1.0x playback as byte ranges of the stems ──────────────────
+#
+# MP3 is a sequence of frames (1152 samples each) that the browser can decode from any
+# frame boundary, as long as it's given a couple of frames before it: a frame can borrow
+# bits from the frames just before it, and its output overlaps the previous one's. So the
+# player fetches each ~30s segment of the original stems as a byte range straight from R2
+# (with WARMUP_FRAMES in front, decoded and discarded) instead of the server decoding and
+# re-encoding them. Tested in Chrome and Firefox on six 21-minute stems: a slice decodes to
+# exactly the predicted length and position, only its first ~1.9 frames differ from
+# decoding the whole file, and the rest is bit-identical (Firefox: within 1 LSB).
+
+def _id3v2_end(data: bytes) -> int:
+    """Where an MP3's audio starts: after its ID3v2 tag, if it has one (ffmpeg writes one)."""
+    if data[:3] != b"ID3" or len(data) < 10:
+        return 0
+    size = ((data[6] & 0x7F) << 21 | (data[7] & 0x7F) << 14
+            | (data[8] & 0x7F) << 7 | data[9] & 0x7F)  # 7 bits per byte ("syncsafe")
+    return 10 + size + (10 if data[5] & 0x10 else 0)  # header, tag, footer
+
+
+def mp3_gapless(head: bytes) -> tuple[int, int] | None:
+    """(decoded length, delay) in samples of an MP3, from its first bytes — or None if it has
+    no Xing/Info frame with a LAME tag (which LAME and ffmpeg write). The length is what
+    ffmpeg decodes: frames × samples-per-frame − encoder delay − padding, the gapless trim
+    its mp3 demuxer applies. The delay is how far into the raw decoder output the audio
+    starts: the encoder's delay from the LAME tag plus the MP3 decoder's own 529 samples."""
+    i = _id3v2_end(head)
+    if len(head) < i + 4 or head[i] != 0xFF or head[i + 1] & 0xE0 != 0xE0:
+        return None
+    mpeg1 = (head[i + 1] >> 3) & 3 == 3
+    if (head[i + 1] >> 1) & 3 != 1:  # not Layer III
+        return None
+    mono = head[i + 3] >> 6 == 3
+    x = i + 4 + ((17 if mono else 32) if mpeg1 else (9 if mono else 17))  # after the side info
+    if head[x:x + 4] not in (b"Xing", b"Info"):
+        return None
+    flags = int.from_bytes(head[x + 4:x + 8], "big")
+    if not flags & 1:  # no frame count
+        return None
+    frames = int.from_bytes(head[x + 8:x + 12], "big")
+    lame = x + 12 + (4 if flags & 2 else 0) + (100 if flags & 4 else 0) + (4 if flags & 8 else 0)
+    if len(head) < lame + 24:
+        return None
+    delay_padding = int.from_bytes(head[lame + 21:lame + 24], "big")
+    delay, padding = delay_padding >> 12, delay_padding & 0xFFF
+    return frames * (1152 if mpeg1 else 576) - delay - padding, delay + 529
+
+
+FRAME_INDEX = "frames.json"  # next to a job's stems — not a stem, so kept out of the manifest
+PRACTICE_STEMS = ("vocals", "bass", "drums", "guitar", "piano", "other")  # as in static/index.html
+WARMUP_FRAMES = 3            # slices need 2; one to spare
+_MP3_BITRATES = {True: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+                 False: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160]}
+_MP3_RATES = {3: [44100, 48000, 32000], 2: [22050, 24000, 16000], 0: [11025, 12000, 8000]}
+
+
+def mp3_frames(data: bytes) -> tuple[int, int, list[int]]:
+    """(sample rate, samples per frame, byte offsets of every audio frame plus the end of the
+    last) for a Layer III MP3 — skipping any ID3v2 tag and the Xing/Info frame, which holds
+    no audio. Raises ValueError if the frame headers don't chain."""
+    i = _id3v2_end(data)
+    offsets, sr, mpeg1 = [], None, None
+    while i + 4 <= len(data):
+        b1, b2 = data[i + 1], data[i + 2]
+        if data[i] != 0xFF or b1 & 0xE0 != 0xE0 or (b1 >> 1) & 3 != 1 or b2 >> 4 in (0, 15):
+            if data[i:i + 3] == b"TAG" and len(data) - i == 128:
+                break  # an ID3v1 tag at the end
+            raise ValueError(f"no MP3 frame at byte {i}")
+        ver = (b1 >> 3) & 3
+        mpeg1, sr = ver == 3, _MP3_RATES[ver][(b2 >> 2) & 3]
+        offsets.append(i)
+        i += (144 if mpeg1 else 72) * _MP3_BITRATES[mpeg1][b2 >> 4] * 1000 // sr + ((b2 >> 1) & 1)
+    if not offsets:
+        raise ValueError("no MP3 frames")
+    first = data[offsets[0]:offsets[1] if len(offsets) > 1 else i]
+    if b"Xing" in first[:64] or b"Info" in first[:64]:
+        offsets = offsets[1:]
+    return sr, 1152 if mpeg1 else 576, offsets + [i]
+
+
+def build_frame_index(files: dict[str, bytes], segment_s: float = 30.0) -> dict | None:
+    """The player's layout for fetching `files` ({name: MP3 bytes}, one job's stems) as
+    byte ranges: ~`segment_s` segments on frame boundaries, shared by every stem, and each
+    stem's byte range per segment (from WARMUP_FRAMES before the segment to its end). None
+    if they aren't all gapless-tagged MP3s with the same layout, in which case the player
+    downloads the stems whole instead. Segment j covers audio frames start..end, i.e. track
+    samples start×spf − delay up to end×spf − delay (from 0 for the first; to `length` for
+    the last)."""
+    stems = {}
+    for name, data in files.items():
+        gapless = mp3_gapless(data[:1 << 16])
+        if not gapless:
+            return None
+        try:
+            sr, spf, offsets = mp3_frames(data)
+        except ValueError:
+            return None
+        stems[name] = (sr, spf, gapless, offsets)
+    layouts = {(sr, spf, gapless, len(offsets)) for sr, spf, gapless, offsets in stems.values()}
+    if len(layouts) != 1:
+        return None
+    sr, spf, (length, delay), n_offsets = layouts.pop()
+    n_frames = n_offsets - 1  # the offsets end with the end of the last frame
+    per = round(segment_s * sr / spf)
+    starts = list(range(0, n_frames, per))
+    if len(starts) > 1 and n_frames - starts[-1] < per // 2:
+        starts.pop()  # fold a short tail into the previous segment
+    segments = [{"first": max(0, a - WARMUP_FRAMES), "start": a, "end": b}
+                for a, b in zip(starts, starts[1:] + [n_frames])]
+    return {"sample_rate": sr, "samples_per_frame": spf, "delay": delay, "length": length,
+            "segments": segments,
+            "bytes": {name: [[offsets[s["first"]], offsets[s["end"]]] for s in segments]
+                      for name, (_, _, _, offsets) in stems.items()}}
+
+
+def practice_mp3s(names) -> list[str]:
+    """The files the practice player plays: MP3s named ..._<practice stem>.mp3."""
+    return [n for n in names if n.endswith(".mp3") and n[:-4].split("_")[-1] in PRACTICE_STEMS]
+
+
+def frames_for_client(r2, bucket: str, prefix: str, index: dict | None) -> dict | None:
+    """A frame index plus presigned URLs for fetching the ranges. They're distinct from the
+    stems' other URLs (a Cache-Control override) so the browser can't answer these CORS range
+    requests from a cached non-CORS response of the same URL — the stem cards' <audio>
+    elements fetch those, and that made R2 fetches fail CORS."""
+    if not index:
+        return None
+    urls = {name: r2.generate_presigned_url(
+                "get_object", Params={"Bucket": bucket, "Key": f"{prefix}/{name}",
+                                      "ResponseCacheControl": "no-store"}, ExpiresIn=86400)
+            for name in index["bytes"]}
+    return {**index, "urls": urls}
+
+
+def ensure_frame_index(prefix: str, names: list[str]) -> dict | None:
+    """The job's frame index (see build_frame_index), for the browser: read from R2, or —
+    for a result saved before there were frame indexes — built from its stems (one download
+    of each) and stored. None if it's not a practice-mode result or the stems don't qualify
+    (stored too, as `null`, so they're only checked once)."""
+    stems = practice_mp3s(names)
+    if len(stems) < 3:
+        return None
+    r2, bucket = get_r2(), os.environ["R2_BUCKET_NAME"]
+    try:
+        stored = r2.get_object(Bucket=bucket, Key=f"{prefix}/{FRAME_INDEX}")["Body"].read()
+        index = json.loads(stored)
+    except r2.exceptions.NoSuchKey:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=len(stems)) as pool:
+            data = dict(zip(stems, pool.map(
+                lambda n: r2.get_object(Bucket=bucket, Key=f"{prefix}/{n}")["Body"].read(), stems)))
+        index = build_frame_index(data)
+        r2.put_object(Bucket=bucket, Key=f"{prefix}/{FRAME_INDEX}",
+                      Body=json.dumps(index).encode(), ContentType="application/json")
+    return frames_for_client(r2, bucket, prefix, index)
 
 
 # ── Practice-mode speed changes (/api/speed) ────────────────────────────────

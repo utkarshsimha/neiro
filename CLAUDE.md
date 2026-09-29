@@ -136,7 +136,22 @@ and only the web image includes it. Both reach the Modal images only via
    `stretch_stems` polls — closing a `remote_gen` stream doesn't cancel the remote call, and
    `FunctionCall.cancel` can't look up `remote_gen` calls). Segment downloads (`fetchStemBytes`)
    abort and retry when a 5s window brings under 10% of the median recent download rate
-   (floor 16 KB/s) — connections occasionally stall or trickle for 25s+. The player keeps every
+   (floor 16 KB/s) — connections occasionally stall or trickle for 25s+. The initial load of
+   a track in R2 (saved or staged) doesn't go through the server at all: each ~30s segment
+   is fetched as a **byte range of the original stem MP3s** straight from R2 and decoded by the
+   browser (at the stems' 44.1 kHz). A frame index per job (`frames.json` next to the stems —
+   `build_frame_index`; written when a run is staged, built on first `/api/result` for older
+   saved results, never listed in the manifest) gives each segment's byte range starting 3
+   frames early; tested in Chrome and Firefox, a slice decodes to exactly the predicted
+   position with only its first ~1.9 frames differing from a whole-file decode, so trimming
+   the warm-up frames is plain arithmetic and the joins are bit-exact. It's playable ~0.3-0.5s
+   after the request, the whole track is seekable at once, and it costs no server CPU or R2
+   writes (an earlier version streamed 1.0x through the server, re-encoding ~130 CPU-s of MP3
+   per 21-minute load). The range requests use their own presigned URLs (a Cache-Control
+   override) so they can't be answered from the stem cards' cached non-CORS `<audio>`
+   responses. Without a frame index (e.g. no R2) the player downloads the MP3s whole
+   (`loadWhole`), which is also its fallback if a range load fails. Safari (Apple's MP3
+   decoder) hasn't been tested with byte-range slices yet. The player keeps every
    segment compressed and decodes only the playhead's segment, the next and the previous
    (`ensureWindow`) — decoded, a 21-minute 6-stem track is ~3.3 GB, and holding it all (twice,
    during a speed change) peaked Chrome at ~7 GB; a seek outside the window waits ~0.5s for
