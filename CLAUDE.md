@@ -110,7 +110,12 @@ and only the web image includes it. Both reach the Modal images only via
 7. Practice mode's speed control (`/api/speed`) re-renders every stem at a new tempo via
    Rubber Band (the `rubberband` CLI run directly on WAV files, with ffmpeg decoding before
    and encoding FLAC after — `stream_stretch` in `neiro_common.py`; decoding the MP3s in Python via
-   soundfile was ~6x slower on long tracks) without shifting pitch. It only runs while
+   soundfile was ~6x slower on long tracks) without shifting pitch. The stems are decoded as
+   they download from R2 (`StreamingDecode`: the R2 body piped into ffmpeg), with the track's
+   exact length read from the MP3 header (`mp3_length`), so the layout and the playhead's
+   first chunks don't wait for whole stems — for a 21-minute track this made a speed change
+   playable ~4s sooner. (ffmpeg decoding from a pipe doesn't trim the MP3's end padding, so
+   reads stop at the header's length.) It only runs while
    paused (the frontend disables the slider during playback), and every request starts
    from the pristine (rate=1) stems rather than the
    currently-loaded buffers (so repeated speed changes don't compound re-stretches). When
