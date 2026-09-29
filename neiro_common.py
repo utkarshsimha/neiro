@@ -16,6 +16,7 @@ import re
 import subprocess
 import uuid
 from datetime import datetime, timezone
+from typing import BinaryIO
 
 # Always revalidate the SPA shell — it's a single file, so a stale cached copy after a deploy
 # silently keeps calling removed/changed API routes.
@@ -408,21 +409,190 @@ def _seam_crossfade(tail, head, fade_in, fade_out):
     return (tail * fade_out + head * fade_in) / norm
 
 
+_READ_BYTES = 1 << 16  # how much of an input StreamingDecode reads at a time
+
+
+def mp3_length(head: bytes) -> int | None:
+    """The exact decoded length, in samples, of an MP3 from its first bytes — or None if it
+    has no Xing/Info frame with a LAME tag (which LAME and ffmpeg write). It's what ffmpeg
+    decodes: frames × samples-per-frame − encoder delay − padding, the same gapless trim
+    ffmpeg's mp3 demuxer applies. Lets stream_stretch lay out the segments before the stem
+    has finished downloading."""
+    i = 0
+    if head[:3] == b"ID3" and len(head) >= 10:  # skip an ID3v2 tag (ffmpeg writes one)
+        size = ((head[6] & 0x7F) << 21 | (head[7] & 0x7F) << 14
+                | (head[8] & 0x7F) << 7 | head[9] & 0x7F)  # 7 bits per byte ("syncsafe")
+        i = 10 + size + (10 if head[5] & 0x10 else 0)  # header, tag, footer
+    if len(head) < i + 4 or head[i] != 0xFF or head[i + 1] & 0xE0 != 0xE0:
+        return None
+    mpeg1 = (head[i + 1] >> 3) & 3 == 3
+    if (head[i + 1] >> 1) & 3 != 1:  # not Layer III
+        return None
+    mono = head[i + 3] >> 6 == 3
+    x = i + 4 + ((17 if mono else 32) if mpeg1 else (9 if mono else 17))  # after the side info
+    if head[x:x + 4] not in (b"Xing", b"Info"):
+        return None
+    flags = int.from_bytes(head[x + 4:x + 8], "big")
+    if not flags & 1:  # no frame count
+        return None
+    frames = int.from_bytes(head[x + 8:x + 12], "big")
+    lame = x + 12 + (4 if flags & 2 else 0) + (100 if flags & 4 else 0) + (4 if flags & 8 else 0)
+    if len(head) < lame + 24:
+        return None
+    delay_padding = int.from_bytes(head[lame + 21:lame + 24], "big")
+    return frames * (1152 if mpeg1 else 576) - (delay_padding >> 12) - (delay_padding & 0xFFF)
+
+
+class StreamingDecode:
+    """One input decoded by ffmpeg to 16-bit PCM as its bytes arrive (an R2 download, or a
+    file), into a raw file at `path` whose start can be read while the rest is still
+    downloading and decoding. On Modal's web container, downloading six 21-minute stems in
+    full and then decoding them took 5-8s, where the first chunks need only a few seconds
+    of each.
+
+    `src` is a readable binary file object, read to the end and closed by a feeder thread.
+    Use format(), length() and read(); close() stops the decode."""
+
+    def __init__(self, src: BinaryIO, path: str):
+        import tempfile
+        import threading
+
+        self._path = path
+        self._cond = threading.Condition()
+        self._frames = 0            # decoded so far
+        self._done = False
+        self._error = None
+        self._sr = self._channels = None
+        self._predicted = None      # exact length from the MP3's header, if it has one
+        self._head_read = False
+        self._stderr = tempfile.TemporaryFile()
+        self._proc = subprocess.Popen(
+            ["ffmpeg", "-loglevel", "error", "-i", "pipe:0", "-map_metadata", "-1",
+             "-fflags", "+bitexact", "-c:a", "pcm_s16le", "-f", "wav", "pipe:1"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._stderr)
+        threading.Thread(target=self._feed, args=(src,), daemon=True).start()
+        threading.Thread(target=self._drain, daemon=True).start()
+
+    def _set(self, **state):
+        with self._cond:
+            for name, value in state.items():
+                setattr(self, name, value)
+            self._cond.notify_all()
+
+    def _feed(self, src: BinaryIO) -> None:
+        """Pipe `src` into ffmpeg, noting the MP3 header's length on the way."""
+        try:
+            head = src.read(_READ_BYTES)
+            self._set(_predicted=mp3_length(head), _head_read=True)
+            while head:
+                self._proc.stdin.write(head)
+                head = src.read(_READ_BYTES)
+        except (BrokenPipeError, ValueError, OSError):
+            pass  # ffmpeg exited (an error, reported by _drain) or we were closed
+        except Exception as e:  # noqa: BLE001 — e.g. the download failed; surfaced to readers
+            self._set(_error=e)
+        finally:
+            self._set(_head_read=True)
+            for f in (self._proc.stdin, src):
+                try:
+                    f.close()
+                except Exception:
+                    pass
+
+    def _drain(self) -> None:
+        """Copy ffmpeg's output to the raw file, noting how much is decoded."""
+        out = self._proc.stdout
+        try:
+            # ffmpeg's WAV header on a pipe has placeholder sizes; take the format from 'fmt '
+            # and treat everything after 'data' as samples.
+            if out.read(12)[:4] != b"RIFF":
+                raise RuntimeError("ffmpeg produced no audio")
+            while True:
+                chunk_id, size = out.read(4), int.from_bytes(out.read(4), "little")
+                if chunk_id == b"data":
+                    break
+                body = out.read(size + (size & 1))
+                if chunk_id == b"fmt ":
+                    self._set(_channels=int.from_bytes(body[2:4], "little"),
+                              _sr=int.from_bytes(body[4:8], "little"))
+            frame_bytes, total = 2 * self._channels, 0
+            with open(self._path, "wb") as fh:
+                while chunk := out.read1(_READ_BYTES):
+                    fh.write(chunk)
+                    fh.flush()
+                    total += len(chunk)
+                    self._set(_frames=total // frame_bytes)
+            if self._proc.wait() != 0:
+                self._stderr.seek(0)
+                stderr = self._stderr.read().decode(errors="replace").strip()
+                raise RuntimeError(f"ffmpeg failed: {stderr[-500:]}")
+        except Exception as e:  # noqa: BLE001 — surfaced to readers
+            if self._error is None:
+                self._set(_error=e)
+        finally:
+            self._set(_done=True)
+
+    def _wait(self, ready) -> None:
+        with self._cond:
+            self._cond.wait_for(lambda: ready() or self._done or self._error)
+            if self._error:
+                raise self._error
+
+    def format(self) -> tuple[int, int]:
+        """(sample rate, channels), once ffmpeg has started producing audio."""
+        self._wait(lambda: self._sr is not None)
+        if self._sr is None:
+            raise RuntimeError("ffmpeg produced no audio")
+        return self._sr, self._channels
+
+    def length(self) -> int:
+        """Total length in samples: from the MP3's header if it has one, else once fully decoded."""
+        self._wait(lambda: self._head_read)
+        if self._predicted is not None:
+            return self._predicted
+        self._wait(lambda: False)
+        return self._frames
+
+    def read(self, start: int, stop: int) -> "numpy.ndarray":
+        """Samples start..stop (frames × channels, int16), waiting until they're decoded;
+        zero-padded past the end."""
+        import numpy as np
+
+        # Decoding from a pipe, ffmpeg skips the MP3's encoder delay but not its end padding
+        # (~a few hundred near-silent samples): the header's length is where the audio ends.
+        end = self._predicted if self._predicted is not None else float("inf")
+        self._wait(lambda: self._frames >= min(stop, end))
+        avail = max(0, min(stop, self._frames, end) - start)
+        audio = np.fromfile(self._path, dtype="<i2", count=avail * self._channels,
+                            offset=start * self._channels * 2).reshape(-1, self._channels)
+        if len(audio) < stop - start:
+            audio = np.pad(audio, ((0, stop - start - len(audio)), (0, 0)))
+        return audio
+
+    def close(self) -> None:
+        try:
+            self._proc.kill()
+        except Exception:
+            pass
+
+
 STEM_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,32}$")  # stem names end up in R2 keys
 
 
-def stream_stretch(srcs: dict[str, str], rate: float, workdir: str, pool, deliver,
+def stream_stretch(srcs: dict[str, str | BinaryIO], rate: float, workdir: str, pool, deliver,
                    chunk_s: float = 30.0, start_fraction: float = 0.0,
                    pad_s: float = 2.0, xfade_s: float = 0.05):
-    """Pitch-preserving time-stretch of every stem in `srcs` ({stem: audio file}) to `rate`,
-    yielding the output piece by piece as it's ready, so the browser can start playing
-    before the rest is done.
+    """Pitch-preserving time-stretch of every stem in `srcs` ({stem: audio file path, or a
+    readable binary stream such as an R2 download}) to `rate`, yielding the output piece by
+    piece as it's ready, so the browser can start playing before the rest is done.
 
     The stretch is Rubber Band — chosen over WSOLA/phase-vocoder options (e.g. the
     AudioWorklet approach tried earlier) because it's tuned for polyphonic full mixes —
     run as the rubberband CLI on 16-bit WAV (the same `rubberband -q --tempo <rate>` call
-    pyrubberband made). ffmpeg decodes the MP3s first: soundfile took ~11s per 21-minute
-    stem on Modal, ffmpeg under a second.
+    pyrubberband made). ffmpeg decodes the MP3s (soundfile took ~11s per 21-minute stem on
+    Modal, ffmpeg under a second), as they download (StreamingDecode): with the length from
+    the MP3 header (mp3_length) the layout is known up front, and each chunk waits only for
+    the audio it needs.
 
     One rubberband process is single-stream (~41s for a 21-minute stem on Modal), so each
     stem is cut into `chunk_s` pieces stretched in parallel on `pool` (shared across
@@ -451,6 +621,23 @@ def stream_stretch(srcs: dict[str, str], rate: float, workdir: str, pool, delive
       {"type": "done"}
 
     Raises the first error from any worker."""
+    # Every stem starts decoding at once, as it downloads; the decoders are stopped however
+    # the stretch ends (finished, failed, or the client went away).
+    decoders = {stem: StreamingDecode(open(src, "rb") if isinstance(src, str) else src,
+                                      os.path.join(workdir, f"{stem}.pcm"))
+                for stem, src in srcs.items()}
+    try:
+        yield from _stretch_decoded(decoders, rate, workdir, pool, deliver, chunk_s=chunk_s,
+                                    start_fraction=start_fraction, pad_s=pad_s, xfade_s=xfade_s)
+    finally:
+        for decoder in decoders.values():
+            decoder.close()
+
+
+def _stretch_decoded(decoders: dict[str, StreamingDecode], rate: float, workdir: str, pool,
+                     deliver, *, chunk_s: float, start_fraction: float, pad_s: float,
+                     xfade_s: float):
+    """stream_stretch, once its inputs are decoding."""
     import io
     import queue
     import threading
@@ -460,19 +647,12 @@ def stream_stretch(srcs: dict[str, str], rate: float, workdir: str, pool, delive
     import numpy as np
     import soundfile as sf
 
-    stems = list(srcs)
-
-    def decode(stem):
-        wav = os.path.join(workdir, f"{stem}.wav")
-        run_cmd(["ffmpeg", "-loglevel", "error", "-y", "-i", srcs[stem], "-c:a", "pcm_s16le", wav])
-        return stem, wav, sf.info(wav)
-
-    decoded = list(pool.map(decode, stems))
-    wavs = {stem: wav for stem, wav, _ in decoded}
-    sr = decoded[0][2].samplerate
+    stems = list(decoders)
+    sr = decoders[stems[0]].format()[0]
     # One layout for all stems (they should be the same length; if not, shorter ones are
-    # zero-padded), so segment boundaries — and sync — are shared.
-    n = max(info.frames for _, _, info in decoded)
+    # zero-padded), so segment boundaries — and sync — are shared. For MP3s the length is
+    # in their header, so this doesn't wait for the decode.
+    n = max(decoder.length() for decoder in decoders.values())
 
     chunk, pad = int(chunk_s * sr), int(pad_s * sr)
     bounds = list(range(0, n, chunk)) + [n]
@@ -513,8 +693,7 @@ def stream_stretch(srcs: dict[str, str], rate: float, workdir: str, pool, delive
     def stretch_chunk(stem: str, k: int) -> tuple[int, str]:
         e0, e1 = max(0, bounds[k] - pad), min(n, bounds[k + 1] + pad)
         src, dst = (os.path.join(workdir, f"{stem}_{k}_{s}.wav") for s in ("in", "out"))
-        audio = sf.read(wavs[stem], start=e0, stop=e1, dtype="int16", always_2d=True)[0]
-        sf.write(src, audio, sr, subtype="PCM_16")
+        sf.write(src, decoders[stem].read(e0, e1), sr, subtype="PCM_16")
         if rate == 1.0:
             os.replace(src, dst)
         else:
@@ -584,10 +763,12 @@ def stream_stretch(srcs: dict[str, str], rate: float, workdir: str, pool, delive
         io_pool.shutdown(wait=False, cancel_futures=True)
 
 
-def fetch_speed_inputs(inputs: dict, workdir: str) -> dict[str, str]:
-    """Materialise /api/speed inputs — {stem: ("r2", key) | ("b64", data)} — as files in
-    `workdir`, concurrently. Raises FileNotFoundError if an R2 stem is gone (e.g. an
-    expired tmp/ copy), which the API turns into a 404 so the client can re-upload."""
+def open_speed_inputs(inputs: dict) -> dict[str, BinaryIO]:
+    """Open /api/speed inputs — {stem: ("r2", key) | ("b64", data)} — as readable byte
+    streams, concurrently: an R2 object's download is only started, so stream_stretch can
+    decode it as it arrives. Raises FileNotFoundError if an R2 stem is gone (e.g. an expired
+    tmp/ copy), which the API turns into a 404 so the client can re-upload."""
+    import io
     from concurrent.futures import ThreadPoolExecutor
 
     from botocore.exceptions import ClientError
@@ -597,18 +778,14 @@ def fetch_speed_inputs(inputs: dict, workdir: str) -> dict[str, str]:
 
     def one(item):
         stem, (kind, ref) = item
-        path = os.path.join(workdir, f"{stem}.src")
-        if kind == "r2":
-            try:
-                r2.download_file(bucket, ref, path)
-            except ClientError as e:
-                if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
-                    raise FileNotFoundError(ref)
-                raise
-        else:
-            with open(path, "wb") as fh:
-                fh.write(base64.b64decode(ref))
-        return stem, path
+        if kind != "r2":
+            return stem, io.BytesIO(base64.b64decode(ref))
+        try:
+            return stem, r2.get_object(Bucket=bucket, Key=ref)["Body"]
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
+                raise FileNotFoundError(ref)
+            raise
 
     with ThreadPoolExecutor(max_workers=len(inputs)) as pool:
         return dict(pool.map(one, inputs.items()))
@@ -616,9 +793,9 @@ def fetch_speed_inputs(inputs: dict, workdir: str) -> dict[str, str]:
 
 def run_speed_stream(inputs: dict, rate: float, workdir: str, pool, deliver,
                      chunk_s: float, start_fraction: float):
-    """The whole of a streamed speed change: fetch the inputs (see fetch_speed_inputs), then
+    """The whole of a streamed speed change: open the inputs (see open_speed_inputs), then
     yield stream_stretch's events. Shared by the in-process path and Modal's stretch_stems."""
-    srcs = fetch_speed_inputs(inputs, workdir)
+    srcs = open_speed_inputs(inputs)
     yield from stream_stretch(srcs, rate, workdir, pool, deliver, chunk_s, start_fraction)
 
 
