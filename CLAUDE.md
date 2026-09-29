@@ -136,8 +136,12 @@ and only the web image includes it. Both reach the Modal images only via
    `stretch_stems` polls — closing a `remote_gen` stream doesn't cancel the remote call, and
    `FunctionCall.cancel` can't look up `remote_gen` calls). Segment downloads (`fetchStemBytes`)
    abort and retry when a 5s window brings under 10% of the median recent download rate
-   (floor 16 KB/s) — connections occasionally stall or trickle for 25s+. 1.0x is decoded
-   locally from the pristine bytes. On Modal, R2-backed requests run on a separate `stretch_stems` generator
+   (floor 16 KB/s) — connections occasionally stall or trickle for 25s+. The player keeps every
+   segment compressed and decodes only the playhead's segment, the next and the previous
+   (`ensureWindow`) — decoded, a 21-minute 6-stem track is ~3.3 GB, and holding it all (twice,
+   during a speed change) peaked Chrome at ~7 GB; a seek outside the window waits ~0.5s for
+   one segment's decode. Going back to 1.0x never touches the server: the 1.0x track
+   (`pristineTrack`) stays in memory compressed after a speed change. On Modal, R2-backed requests run on a separate `stretch_stems` generator
    function (12 CPUs reserved — what the playhead's first segment needs, 2 chunks × 6
    stems — bursting to 32; a fixed 32 was no faster to first playback and cost ~2x, since
    reserved cores are billed while idle — and 8 GB), working
