@@ -39,12 +39,12 @@ deploy-legacy: ## Redeploy the same code under the old "song-lab" app name, so o
 	uv run modal deploy modal_app.py --name song-lab
 
 deploy-cobalt: ## Deploy the self-hosted Cobalt YouTube-extraction service (see cobalt_app.py)
-	uv run modal secret create cobalt \
-		COBALT_URL="$$(uv run python3 -c 'import cobalt_app; print(cobalt_app.COBALT_URL)')" \
-		COBALT_API_KEY="$$(uv run python3 -c 'import uuid; print(uuid.uuid4())')" \
-		--force
+	@# One shell, so the generated key can be printed: Modal can't show a secret's value later.
+	@url="$$(uv run python3 -c 'import cobalt_app; print(cobalt_app.COBALT_URL)')" && \
+	key="$$(uv run python3 -c 'import uuid; print(uuid.uuid4())')" && \
+	uv run modal secret create cobalt COBALT_URL="$$url" COBALT_API_KEY="$$key" --force && \
+	printf '\nPut these in .env for local dev (make web), and run `make deploy`\nso the deployed web app picks up the new key:\n  COBALT_URL=%s\n  COBALT_API_KEY=%s\n\n' "$$url" "$$key" && \
 	uv run modal deploy cobalt_app.py
-	@echo "Copy the COBALT_URL / COBALT_API_KEY above into .env for local dev (make web)."
 
 # Usage: make r2-setup [BUCKET=neiro]
 BUCKET ?= neiro
