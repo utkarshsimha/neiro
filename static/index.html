@@ -2913,6 +2913,7 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
     // Arrow-key seeking follows the transport buttons: locked while a speed change's
     // audio under the playhead is still on its way.
     seekBy:  delta => { if (duration && track && !playBtn.disabled) doSeek(getPosition() + delta); },
+    togglePlay: () => { if (!playBtn.disabled) playBtn.click(); },
     destroy: () => {
       if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
       speedRun?.abort.abort();
@@ -3028,26 +3029,50 @@ function arrayBufferToBase64(buf) {
   return btoa(binary);
 }
 
-// ── Keyboard: ←/→ seek ∓/±5s (practice mixer or karaoke player) ─────────────
+// Whether the global shortcuts apply when `t` has focus. Text fields and selects keep their
+// native keys; Space also overrides buttons, links and sliders/checkboxes (it'd otherwise
+// click the focused control, or nudge the slider), so it works after mouse-clicking a
+// transport button. Arrows still leave sliders alone, as they use them to adjust.
+function keyboardOwnsTarget(t, isSpace) {
+  if (!(t instanceof HTMLElement)) return true;
+  if (t.isContentEditable || /^(TEXTAREA|SELECT)$/.test(t.tagName)) return false;
+  if (t.tagName === 'INPUT') return isSpace && /^(range|checkbox|radio|button|submit|reset)$/.test(t.type);
+  return true;
+}
+
+// ── Keyboard: ←/→ seek ∓/±5s, Space play/pause (practice mixer or karaoke player) ─
 document.addEventListener('keydown', e => {
-  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  const isSpace = e.key === ' ';
+  if (!isSpace && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
   if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
-  const t = e.target;
-  // Leave arrows alone in anything that uses them natively (speed slider, text fields, ...)
-  if (t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+  if (!keyboardOwnsTarget(e.target, isSpace)) return;
   if (!saveModal.classList.contains('hidden')) return;
 
-  const delta = e.key === 'ArrowRight' ? 5 : -5;
-  if (!karaokePlayerCard.classList.contains('hidden') && kpAudioInstrum.duration) {
-    const target = Math.max(0, Math.min(kpAudioInstrum.duration, kpAudioInstrum.currentTime + delta));
-    kpAudioInstrum.currentTime = target;
-    kpAudioVocals.currentTime = target;
-  } else if (practicePlayer) {
-    practicePlayer.seekBy(delta);
+  const karaoke = !karaokePlayerCard.classList.contains('hidden') && kpAudioInstrum.duration;
+  if (isSpace) {
+    if (karaoke) kpPlayBtn.click();
+    else if (practicePlayer) practicePlayer.togglePlay();
+    else return;
   } else {
-    return;
+    const delta = e.key === 'ArrowRight' ? 5 : -5;
+    if (karaoke) {
+      const target = Math.max(0, Math.min(kpAudioInstrum.duration, kpAudioInstrum.currentTime + delta));
+      kpAudioInstrum.currentTime = target;
+      kpAudioVocals.currentTime = target;
+    } else if (practicePlayer) {
+      practicePlayer.seekBy(delta);
+    } else {
+      return;
+    }
   }
   e.preventDefault();
+});
+
+// Buttons activate on Space's keyup (Firefox ignores a keydown preventDefault for that)
+document.addEventListener('keyup', e => {
+  if (e.key !== ' ' || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+  if (!keyboardOwnsTarget(e.target, true) || !saveModal.classList.contains('hidden')) return;
+  if (practicePlayer || !karaokePlayerCard.classList.contains('hidden')) e.preventDefault();
 });
 
 function pauseAll() {
