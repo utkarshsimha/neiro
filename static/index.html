@@ -2649,8 +2649,23 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
     else doPlay();
   });
   restartBtn.addEventListener('click', () => doSeek(0));
-  skipBackBtn.addEventListener('click', () => doSeek(getPosition() - 5));
-  skipFwdBtn.addEventListener('click', () => doSeek(getPosition() + 5));
+  // Skip by `delta` seconds. While looping, a skip from inside the loop that would cross a
+  // marker reflects off it: the overshoot continues from the opposite marker.
+  function skipBy(delta) {
+    const p = getPosition();
+    let target = p + delta;
+    if (looping) {
+      const a = loopStart * duration, b = loopEnd * duration;
+      if (p >= a && p <= b) {
+        if (target > b) target = a + (target - b);
+        else if (target < a) target = b - (a - target);
+        target = Math.max(a, Math.min(b, target));
+      }
+    }
+    doSeek(target);
+  }
+  skipBackBtn.addEventListener('click', () => skipBy(-5));
+  skipFwdBtn.addEventListener('click', () => skipBy(5));
 
   // The <input type=range> uses integer steps (1-20, i.e. tenths of x) rather than
   // step="0.1" directly — 0.1 isn't exactly representable in binary floating point,
@@ -2927,7 +2942,7 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
     pause:   () => { if (ppPlaying) doPause(); },
     // Arrow-key seeking follows the transport buttons: locked while a speed change's
     // audio under the playhead is still on its way.
-    seekBy:  delta => { if (duration && track && !playBtn.disabled) doSeek(getPosition() + delta); },
+    seekBy:  delta => { if (duration && track && !playBtn.disabled) skipBy(delta); },
     togglePlay: () => { if (!playBtn.disabled) playBtn.click(); },
     destroy: () => {
       if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
