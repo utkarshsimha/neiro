@@ -2321,6 +2321,20 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
   // while looping is off, for the next time it's turned on.
   let looping = false;
   let loopStart = 0, loopEnd = 1;
+  // Marker positions persist per track (keyed by job id, so only tracks in R2 have them).
+  const loopKey = r2Source ? 'neiro-loop:' + r2Source.prefix.split('/').pop() : null;
+  if (loopKey) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(loopKey));
+      if (saved && saved.start >= 0 && saved.end <= 1 && saved.start < saved.end) {
+        loopStart = saved.start; loopEnd = saved.end;
+      }
+    } catch {}
+  }
+  function saveLoop() {
+    if (!loopKey) return;
+    try { localStorage.setItem(loopKey, JSON.stringify({ start: loopStart, end: loopEnd })); } catch {}
+  }
 
   function makeTrack(rate, starts, duration) {
     const perStem = () => Object.fromEntries(stems.map(s => [s, starts.map(() => null)]));
@@ -2591,6 +2605,7 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
       e.stopPropagation();
       if (!drag) return;
       drag = false; seekWrap.classList.remove('dragging');
+      saveLoop();
       ensureWindow();  // decode the (new) loop start's segment
     });
   });
