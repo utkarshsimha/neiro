@@ -20,6 +20,7 @@
       --amber:     #d79921;
       --amber-dk:  #b57614;
       --red:       #fb4934;
+      --blue:      #83a598;
       --radius:    12px;
       --shadow:    0 2px 20px rgba(0,0,0,.45);
     }
@@ -646,6 +647,33 @@
       font-variant-numeric: tabular-nums;
     }
     .pp-seek-wrap:hover .pp-seek-tooltip, .pp-seek-wrap.dragging .pp-seek-tooltip { opacity: 1; }
+    /* Loop region (between the blue start and red end markers) — only while looping */
+    .pp-loop-region {
+      position: absolute; top: -4px; bottom: -4px;
+      background: rgba(131,165,152,.22); border-radius: 3px;
+      pointer-events: none;
+    }
+    .pp-seek-fill { position: relative; }  /* painted over the loop region */
+    /* Each marker's grab area sits on its outer side (the blue's left, the red's right) so
+       they can't cover each other when close together. */
+    .pp-loop-marker {
+      position: absolute; top: 50%; width: 14px; height: 22px;
+      cursor: ew-resize; z-index: 2; display: flex; touch-action: none;
+    }
+    .pp-loop-start { transform: translate(calc(-100% + 2px), -50%); justify-content: flex-end; }
+    .pp-loop-end   { transform: translate(-2px, -50%); justify-content: flex-start; }
+    .pp-loop-marker::before {
+      content: ''; width: 4px; height: 100%; border-radius: 2px;
+      box-shadow: 0 0 0 1px rgba(0,0,0,.35);
+    }
+    .pp-loop-start::before { background: var(--blue); }
+    .pp-loop-end::before   { background: var(--red); }
+    .pp-loop-off .pp-loop-region, .pp-loop-off .pp-loop-marker { display: none; }
+    .pp-loop-toggle {
+      display: flex; align-items: center; gap: .3rem; flex-shrink: 0;
+      font-size: .74rem; color: var(--muted); cursor: pointer; user-select: none;
+    }
+    .pp-loop-toggle input { accent-color: var(--blue); cursor: pointer; margin: 0; }
     .pp-time {
       font-size: .7rem; color: var(--muted); white-space: nowrap;
       min-width: 88px; text-align: right;
@@ -2172,14 +2200,18 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
       <button class="pp-ctrl-btn pp-skip-back-btn" title="Back 5 seconds" disabled>⏪ 5</button>
       <button class="pp-play-btn" aria-label="Play" disabled>▶</button>
       <button class="pp-ctrl-btn pp-skip-fwd-btn" title="Forward 5 seconds" disabled>5 ⏩</button>
-      <div class="pp-seek-wrap" style="pointer-events:none">
+      <div class="pp-seek-wrap pp-loop-off" style="pointer-events:none">
         <div class="pp-seek-track">
+          <div class="pp-loop-region"></div>
           <div class="pp-seek-fill"></div>
           <div class="pp-seek-thumb"></div>
+          <div class="pp-loop-marker pp-loop-start" title="Loop start"></div>
+          <div class="pp-loop-marker pp-loop-end" title="Loop end"></div>
         </div>
         <div class="pp-seek-tooltip"></div>
       </div>
       <span class="pp-time">Loading…</span>
+      <label class="pp-loop-toggle"><input type="checkbox" class="pp-loop-check">loop</label>
     </div>
     <div class="pp-speed-row">
       <span class="pp-speed-icon">⏱</span>
@@ -2208,6 +2240,10 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
   const seekFill    = card.querySelector('.pp-seek-fill');
   const seekThumb   = card.querySelector('.pp-seek-thumb');
   const seekTooltip = card.querySelector('.pp-seek-tooltip');
+  const loopCheck   = card.querySelector('.pp-loop-check');
+  const loopRegion  = card.querySelector('.pp-loop-region');
+  const loopStartEl = card.querySelector('.pp-loop-start');
+  const loopEndEl   = card.querySelector('.pp-loop-end');
   const timeEl      = card.querySelector('.pp-time');
   const gbBtn       = card.querySelector('.gb-export-btn');
   const speedSlider    = card.querySelector('.pp-speed-slider');
@@ -2280,6 +2316,11 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
   let duration = 0;
   let rafId = null;
   let awaitingFirstAudio = true;  // the time display says it's loading until something can play
+  // Looping: while on and playing, leaving [loopStart, loopEnd] jumps back to loopStart. Kept
+  // as fractions of the track, so they stay put in the song across speed changes, and kept
+  // while looping is off, for the next time it's turned on.
+  let looping = false;
+  let loopStart = 0, loopEnd = 1;
 
   function makeTrack(rate, starts, duration) {
     const perStem = () => Object.fromEntries(stems.map(s => [s, starts.map(() => null)]));
@@ -2312,8 +2353,13 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
   // Decoded, only the segment under the playhead, the next (decoded while this one plays,
   // so it's ready by the seam) and the previous (for short seeks back) are kept. Anything
   // further is decoded on demand when the playhead gets there: seeking far away waits (⏳)
-  // for one segment's decode, ~0.5s for six stems on a laptop.
-  function windowAround(t, j) { return [j, j + 1, j - 1].filter(k => k >= 0 && k < t.starts.length); }
+  // for one segment's decode, ~0.5s for six stems on a laptop. While looping, the loop
+  // start's segment is kept too, so jumping back to it doesn't wait.
+  function windowAround(t, j) {
+    const want = [j, j + 1, j - 1];
+    if (looping) want.push(segIndexAt(t.starts, loopStart * t.duration));
+    return want.filter(k => k >= 0 && k < t.starts.length);
+  }
   function dropDecoded(t, j) { stems.forEach(s => { t.bufs[s][j] = null; }); t.ready[j] = false; }
 
   function ensureWindow() {
@@ -2384,7 +2430,8 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
 
   function getPosition() {
     if (!ctx || !ppPlaying) return startOffset;
-    return Math.min(startOffset + (ctx.currentTime - playCtxTime), duration);
+    // Playback is scheduled slightly ahead (see doPlay): until then it's still at startOffset.
+    return Math.max(startOffset, Math.min(startOffset + (ctx.currentTime - playCtxTime), duration));
   }
 
   function stopSources() {
@@ -2500,6 +2547,54 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
     seekDragTime = null;
   });
 
+  // Loop markers: blue (start) and red (end), dragged along the seek bar. They take their
+  // pointer events for themselves, so grabbing one doesn't seek.
+  function showLoop() {
+    loopStartEl.style.left = (loopStart * 100) + '%';
+    loopEndEl.style.left = (loopEnd * 100) + '%';
+    loopRegion.style.left = (loopStart * 100) + '%';
+    loopRegion.style.width = ((loopEnd - loopStart) * 100) + '%';
+  }
+  showLoop();
+  loopCheck.addEventListener('change', () => {
+    looping = loopCheck.checked;
+    seekWrap.classList.toggle('pp-loop-off', !looping);
+    ensureWindow();
+  });
+  [[loopStartEl, true], [loopEndEl, false]].forEach(([el, isStart]) => {
+    let drag = false, grabOffset = 0;  // px from the marker's line to where it was grabbed
+    function setMarker(e) {
+      const r = seekWrap.getBoundingClientRect();
+      const frac = Math.max(0, Math.min(1, (e.clientX - grabOffset - r.left) / r.width));
+      const gap = Math.min(0.5, 1 / duration);  // keep the loop at least a second long
+      if (isStart) loopStart = Math.min(frac, loopEnd - gap);
+      else loopEnd = Math.max(frac, loopStart + gap);
+      showLoop();
+      const t = (isStart ? loopStart : loopEnd) * duration;
+      seekTooltip.style.left = ((t / duration) * 100) + '%';
+      seekTooltip.textContent = fmt(t);
+    }
+    el.addEventListener('pointerdown', e => {
+      e.stopPropagation();
+      if (!duration) return;
+      drag = true; seekWrap.classList.add('dragging'); el.setPointerCapture(e.pointerId);
+      const r = seekWrap.getBoundingClientRect();
+      grabOffset = e.clientX - (r.left + (isStart ? loopStart : loopEnd) * r.width);
+      setMarker(e);
+    });
+    el.addEventListener('pointermove', e => {
+      if (!drag) return;  // just hovering: the seek bar's tooltip follows as usual
+      e.stopPropagation();
+      setMarker(e);
+    });
+    el.addEventListener('pointerup', e => {
+      e.stopPropagation();
+      if (!drag) return;
+      drag = false; seekWrap.classList.remove('dragging');
+      ensureWindow();  // decode the (new) loop start's segment
+    });
+  });
+
   // RAF ticker — position display driven by AudioContext clock (no polling audio elements).
   // It also ends playback at the end of the track, stalls it (then onSegmentReady resumes)
   // when it reaches a segment that isn't ready yet, and moves the decode window along
@@ -2510,7 +2605,9 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
       if (ppPlaying) {
         const p = getPosition();
         if (segAt(p) !== windowSeg) { windowSeg = segAt(p); ensureWindow(); }
-        if (p >= duration - 0.01) {
+        if (looping && (p >= loopEnd * duration - 0.01 || p < loopStart * duration - 0.01)) {
+          doSeek(loopStart * duration);
+        } else if (p >= duration - 0.01) {
           stopSources(); ppPlaying = false; startOffset = 0;
           speedSlider.disabled = false;
           playBtn.textContent = '▶'; playBtn.classList.remove('playing');
