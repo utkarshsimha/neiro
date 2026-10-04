@@ -45,7 +45,8 @@ gpu_image = (
 web_image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("ffmpeg", "rubberband-cli", "libsndfile1")
-    .pip_install("fastapi[standard]", "python-multipart", "boto3", "numpy", "soundfile", "pyrubberband")
+    .pip_install("fastapi[standard]", "python-multipart", "boto3", "numpy", "soundfile", "pyrubberband",
+                 "librosa")  # beat tracking for the loop markers' snap grid (neiro_common.build_beats)
     .add_local_dir("static", remote_path="/app/static")
     .add_local_python_source("neiro_common")
     .add_local_python_source("neiro_web")  # the shared routes; imported only in fastapi_app

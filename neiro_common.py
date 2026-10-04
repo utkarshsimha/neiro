@@ -240,6 +240,17 @@ def stage_to_r2(paths: dict[str, str]) -> dict:
         except Exception:
             import traceback
             traceback.print_exc()  # the player downloads the stems whole instead
+    # The loop markers' snap grid; without it they just don't snap.
+    beats = None
+    drums = next((n for n in stems if n[:-4].split("_")[-1] == "drums"), None)
+    if drums and len(stems) >= 3:
+        try:
+            beats = build_beats(open(paths[drums], "rb").read())
+            r2.put_object(Bucket=bucket, Key=f"{STAGED_PREFIX}/{job_id}/{BEATS_INDEX}",
+                          Body=json.dumps(beats).encode(), ContentType="application/json")
+        except Exception:
+            import traceback
+            traceback.print_exc()
     urls = {
         name: r2.generate_presigned_url(
             "get_object",
@@ -249,7 +260,7 @@ def stage_to_r2(paths: dict[str, str]) -> dict:
             ExpiresIn=86400)
         for name in paths
     }
-    return {"type": "done", "job_id": job_id, "files": urls, "frame_index": frame_index}
+    return {"type": "done", "job_id": job_id, "files": urls, "frame_index": frame_index, "beats": beats}
 
 
 def deliver_outputs(paths: dict[str, str]) -> dict:
@@ -289,7 +300,7 @@ def save_staged(job_id: str, mode: str | None, title: str | None, artist: str | 
     for name in names:
         r2.copy_object(Bucket=bucket, Key=f"results/{job_id}/{name}",
                        CopySource={"Bucket": bucket, "Key": src + name})
-    stems = [n for n in names if n != FRAME_INDEX]  # the frame index isn't a stem
+    stems = [n for n in names if n not in (FRAME_INDEX, BEATS_INDEX)]  # neither index is a stem
     write_manifest(job_id, stems, mode, title, artist)
 
 
@@ -530,6 +541,127 @@ def ensure_frame_index(prefix: str, names: list[str]) -> dict | None:
         r2.put_object(Bucket=bucket, Key=f"{prefix}/{FRAME_INDEX}",
                       Body=json.dumps(index).encode(), ContentType="application/json")
     return frames_for_client(r2, bucket, prefix, index)
+
+
+# ── Beat grid for the loop markers ──────────────────────────────────────────
+
+BEATS_INDEX = "beats.json"  # next to a job's stems, like frames.json; `null` if there's no usable beat
+BEATS_SR = 22050
+
+
+def _drum_attacks(y, sr: int):
+    """Times (s) of the strong attacks in a drum signal: peaks of the steepest rise of its
+    2 ms-smoothed amplitude, ~sample-accurate (spectral onset detectors lag them by a frame)."""
+    import numpy as np
+    from scipy.ndimage import uniform_filter1d
+    from scipy.signal import find_peaks
+
+    def smooth(x, seconds):
+        return uniform_filter1d(x, max(1, int(seconds * sr)), mode="nearest")
+
+    env = smooth(np.abs(y), 0.002)
+    rise = smooth(np.diff(env, prepend=env[0]), 0.004)
+    peaks, _ = find_peaks(rise, height=np.percentile(rise, 99), distance=int(0.05 * sr))
+    return peaks / sr
+
+
+def _lag_to_attacks(beats, attacks, window: float = 0.05, span: int = 20):
+    """Each beat's lag behind the nearest attack within `window` s, as a running median over
+    the beats around it (None where too few have an attack near, or there are no attacks)."""
+    import numpy as np
+
+    if len(attacks) < 2:
+        return None
+    i = np.clip(np.searchsorted(attacks, beats), 1, len(attacks) - 1)
+    near = np.stack([attacks[i - 1], attacks[i]])
+    lag = beats - near[np.abs(near - beats).argmin(0), np.arange(len(beats))]
+    ok = np.abs(lag) <= window
+    est = np.full(len(beats), np.nan)
+    for k in range(len(beats)):
+        lo, hi = max(0, k - span), min(len(beats), k + span + 1)
+        if ok[lo:hi].sum() >= 4:
+            est[k] = np.median(lag[lo:hi][ok[lo:hi]])
+    good = ~np.isnan(est)
+    if not good.any():
+        return None
+    idx = np.arange(len(beats))
+    return np.interp(idx, idx[good], est[good])
+
+
+def build_beats(drums_mp3: bytes) -> dict | None:
+    """Beat times of a track, found on its drums stem (a much cleaner signal than the mix):
+    {"duration": seconds, "bpm": float, "beats": [seconds, ...]}, at the stem's 1.0x speed.
+    The player only uses the beats' spacing and positions, as a snap grid for the loop
+    markers, so which beat is the downbeat and half/double-time confusion don't matter.
+    None if no beats were found.
+
+    librosa's beat tracker lags the actual hits by up to a frame (~23 ms at its default hop),
+    so the beats are shifted by their running-median lag behind the stem's waveform attacks —
+    together, not each to its own nearest attack, which would follow every syncopated ghost
+    note. It's run at two hop sizes, as the finer one sometimes settles on a better tempo
+    (the 3:2 shuffle that the default gets wrong) but is noisier otherwise; the one whose
+    beats land on more attacks wins, the default unless the other is clearly better."""
+    import numpy as np
+    import librosa
+
+    proc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "f32le", "-ac", "1", "-ar", str(BEATS_SR), "pipe:1"],
+        input=drums_mp3, capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode(errors='replace')[-500:]}")
+    y = np.frombuffer(proc.stdout, dtype=np.float32)
+    if len(y) < BEATS_SR * 5:
+        return None
+    attacks = _drum_attacks(y, BEATS_SR)
+
+    def on_attacks(beats) -> float:  # fraction of beats with an attack within 40 ms
+        if len(attacks) < 2:
+            return 0.0
+        i = np.clip(np.searchsorted(attacks, beats), 1, len(attacks) - 1)
+        return float((np.minimum(np.abs(attacks[i - 1] - beats), np.abs(attacks[i] - beats)) <= 0.04).mean())
+
+    best = None  # (score, tempo, beats)
+    for hop in (512, 128):
+        env = librosa.onset.onset_strength(y=y, sr=BEATS_SR, hop_length=hop)
+        # The tempo estimate (an autocorrelation over the whole envelope) is most of the cost on
+        # a long track, so it's taken from a few minutes from the middle; the beats follow the
+        # whole thing.
+        mid, half = len(env) // 2, int(120 * BEATS_SR / hop)
+        tempo = float(np.atleast_1d(librosa.feature.tempo(
+            onset_envelope=env[max(0, mid - half):mid + half], sr=BEATS_SR, hop_length=hop))[0])
+        _, beats = librosa.beat.beat_track(onset_envelope=env, sr=BEATS_SR, hop_length=hop, bpm=tempo, units="time")
+        if len(beats) < 8:
+            continue
+        lag = _lag_to_attacks(beats, attacks)
+        if lag is not None:
+            beats = beats - lag
+        score = on_attacks(beats)
+        if best is None or score > best[0] + 0.05:
+            best = (score, tempo, beats)
+    if best is None:
+        return None
+    _, tempo, beats = best
+    beats = np.sort(beats[beats >= 0])
+    return {"duration": round(len(y) / BEATS_SR, 3), "bpm": round(tempo, 2),
+            "beats": [round(float(b), 3) for b in beats]}
+
+
+def ensure_beats(prefix: str, names: list[str]) -> dict | None:
+    """The job's beats (see build_beats), read from R2 or — for a result from before there
+    were any — computed from its drums stem and stored (`null` too, so it's only tried once).
+    None if there's no drums stem or no beats were found."""
+    drums = next((n for n in practice_mp3s(names) if n[:-4].split("_")[-1] == "drums"), None)
+    if not drums:
+        return None
+    r2, bucket = get_r2(), os.environ["R2_BUCKET_NAME"]
+    try:
+        return json.loads(r2.get_object(Bucket=bucket, Key=f"{prefix}/{BEATS_INDEX}")["Body"].read())
+    except r2.exceptions.NoSuchKey:
+        pass
+    beats = build_beats(r2.get_object(Bucket=bucket, Key=f"{prefix}/{drums}")["Body"].read())
+    r2.put_object(Bucket=bucket, Key=f"{prefix}/{BEATS_INDEX}",
+                  Body=json.dumps(beats).encode(), ContentType="application/json")
+    return beats
 
 
 # ── Practice-mode speed changes (/api/speed) ────────────────────────────────

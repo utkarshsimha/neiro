@@ -681,6 +681,8 @@
       border-bottom: 1px solid var(--border);
       font-size: .74rem; color: var(--muted);
     }
+    .pp-grid-wrap { display: flex; align-items: center; gap: .4rem; user-select: none; }
+    .pp-grid-slider { width: 110px; accent-color: var(--blue); cursor: pointer; }
     .pp-mini-btn {
       width: 28px; height: 24px; border-radius: 6px; padding: 0;
       border: 1px solid var(--border); background: transparent;
@@ -691,6 +693,11 @@
     .pp-mini-btn:disabled { opacity: .4; cursor: not-allowed; }
     .pp-zoom-value { min-width: 3em; text-align: center; font-variant-numeric: tabular-nums; }
     .pp-view-hint { opacity: .6; margin-left: auto; }
+    /* Beat grid ticks under the seek bar, to check the detected beats against the music */
+    .pp-beat-ticks {
+      position: absolute; left: 0; bottom: 0; width: 100%; height: 8px;
+      pointer-events: none; opacity: .6;
+    }
     .pp-time {
       font-size: .7rem; color: var(--muted); white-space: nowrap;
       min-width: 88px; text-align: right;
@@ -1770,7 +1777,7 @@ function handleMessage(msg) {
     progBar.classList.remove('pulsing');
     progBar.style.width = '100%';
     stageSub.textContent = '';
-    showResults(msg.files, false, msg.job_id, msg.frame_index);
+    showResults(msg.files, false, msg.job_id, msg.frame_index, msg.beats);
   } else if (msg.type === 'error') {
     showError(msg.message);
   }
@@ -1849,8 +1856,9 @@ const PRACTICE_STEMS = ['vocals','bass','drums','guitar','piano','other'];
 // stage it (R2 unconfigured/failed), in which case there's nothing to save. For a saved/shared
 // result `jobId` is its library id (used only to let /api/speed read the stems from R2).
 // `frameIndex` is the stems' frame index (see neiro_common.build_frame_index), if they have
-// one: the practice player then fetches 1.0x audio as byte ranges of them.
-async function showResults(files, fromShare = false, jobId = null, frameIndex = null) {
+// one: the practice player then fetches 1.0x audio as byte ranges of them. `beats` is the
+// track's beat times (neiro_common.build_beats), the loop markers' snap grid, if it has them.
+async function showResults(files, fromShare = false, jobId = null, frameIndex = null, beats = null) {
   const filesAreUrls = fromShare || !!jobId;
   blobUrls.forEach(u => URL.revokeObjectURL(u));
   blobUrls = [];
@@ -1922,7 +1930,7 @@ async function showResults(files, fromShare = false, jobId = null, frameIndex = 
     const rangeSource = frameIndex && Object.values(stemNames).every(indexed)
       ? { index: frameIndex, names: stemNames }
       : null;
-    const pc = buildPracticeCard(stemFiles, r2Source, rangeSource);
+    const pc = buildPracticeCard(stemFiles, r2Source, rangeSource, beats);
     practiceMount.appendChild(pc);
     stemsDetails.classList.remove('hidden');
   } else {
@@ -2185,7 +2193,7 @@ function buildZip(entries) {
 // changes can have the server read them there instead of re-uploading; null if they aren't.
 // `rangeSource` ({index: frame index, names: {stem: filename}}) lets the 1.0x audio be
 // fetched as byte ranges of the stems (see applySpeed); null to download them whole.
-function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
+function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null, beats = null) {
   const STEM_ORDER = ['vocals','bass','drums','guitar','piano','other'];
   const stems = STEM_ORDER.filter(s => stemFilesMap[s]);
 
@@ -2225,12 +2233,17 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
           <div class="pp-loop-marker pp-loop-start" title="Loop start"></div>
           <div class="pp-loop-marker pp-loop-end" title="Loop end"></div>
         </div>
+        <canvas class="pp-beat-ticks"></canvas>
         <div class="pp-seek-tooltip"></div>
       </div>
       <span class="pp-time">Loading…</span>
     </div>
     <div class="pp-view-row">
       <label class="pp-loop-toggle"><input type="checkbox" class="pp-loop-check">loop</label>
+      <label class="pp-loop-toggle pp-snap-toggle hidden" title="Snap loop markers to the beat grid (hold Alt to override)"><input type="checkbox" class="pp-snap-check" checked>snap</label>
+      <label class="pp-grid-wrap hidden" title="Grid spacing: finer ← → coarser (the tall ticks are the detected beats)">grid
+        <input type="range" class="pp-grid-slider" min="-5" max="4" step="1" value="0">
+      </label>
     </div>
     <div class="pp-view-row pp-zoom-row hidden">
       <span class="pp-view-label">zoom</span>
@@ -2273,6 +2286,11 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
   const loopRegion  = card.querySelector('.pp-loop-region');
   const loopStartEl = card.querySelector('.pp-loop-start');
   const loopEndEl   = card.querySelector('.pp-loop-end');
+  const snapToggle  = card.querySelector('.pp-snap-toggle');
+  const snapCheck   = card.querySelector('.pp-snap-check');
+  const tickCanvas  = card.querySelector('.pp-beat-ticks');
+  const gridWrap    = card.querySelector('.pp-grid-wrap');
+  const gridSlider  = card.querySelector('.pp-grid-slider');
   const zoomRow     = card.querySelector('.pp-zoom-row');
   const followCheck = card.querySelector('.pp-follow-check');
   const panLeftBtn  = card.querySelector('.pp-pan-left');
@@ -2564,7 +2582,7 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
   let seekDragging = false, seekDragTime = null;
 
   // Zoom and pan: the seek bar shows the part of the track from viewStart to viewEnd (as
-  // fractions), so everything on it — playhead, loop markers — is placed through
+  // fractions), so everything on it — playhead, loop markers, beat ticks — is placed through
   // fracToPct and read back through xToFrac.
   let viewStart = 0, viewEnd = 1;
   const fracToPct = f => (f - viewStart) / (viewEnd - viewStart) * 100;
@@ -2587,6 +2605,7 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
   function applyView() {
     const span = viewEnd - viewStart;
     showLoop();
+    drawBeatTicks();
     zoomValueEl.textContent = (+(1 / span).toFixed(span < 0.1 ? 0 : 1)) + '×';
     zoomInBtn.disabled = !duration || span <= minSpan() + 1e-9;
     zoomOutBtn.disabled = span >= 1;
@@ -2646,6 +2665,93 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
     seekDragTime = null;
   });
 
+  // Beat grid: the loop markers snap to the detected beats, each beat interval cut into a
+  // power-of-two number of pieces (or, coarser than a beat, every 2^k-th beat from the first
+  // one). The grid slider sets the spacing; its default is what's closest to ~`SNAP_S` seconds
+  // without being coarser than a beat. Only spacing and positions matter, so the downbeat and
+  // half/double-time errors are harmless. In fractions of the track, with the spacing taken
+  // from the beats at 1.0x, so the grid doesn't change with the playback speed. The ticks
+  // under the seek bar are this grid: the tall ones are the detected beats, the short ones
+  // the subdivisions between them.
+  const SNAP_S = 0.15;
+  const beatFracs = beats && beats.beats.length >= 8 && beats.duration > 0
+    ? beats.beats.map(b => b / beats.duration) : null;
+  let snapGrid = null, snapIsBeat = null;  // sorted fractions and which are detected beats
+  function buildSnapGrid(k) {  // k ≥ 0: 2^k pieces per beat; k < 0: every 2^-k-th beat
+    const f = [], isBeat = [], last = beatFracs.length - 1;
+    if (k >= 0) {
+      const n = 2 ** k;
+      for (let i = 0; i < last; i++)
+        for (let j = 0; j < n; j++) {
+          f.push(beatFracs[i] + (beatFracs[i + 1] - beatFracs[i]) * j / n);
+          isBeat.push(j === 0);
+        }
+      f.push(beatFracs[last]); isBeat.push(true);
+    } else {
+      for (let i = 0; i <= last; i += 2 ** -k) { f.push(beatFracs[i]); isBeat.push(true); }
+    }
+    // Carry the grid on past the first and last point, at the spacing next to them.
+    const head = f[1] - f[0], tail = f[f.length - 1] - f[f.length - 2], before = [];
+    for (let x = f[0] - head; x >= 0; x -= head) before.push(x);
+    f.unshift(...before.reverse()); isBeat.unshift(...before.map(() => false));
+    for (let x = f[f.length - 1] + tail; x <= 1; x += tail) { f.push(x); isBeat.push(false); }
+    snapGrid = f; snapIsBeat = isBeat;
+  }
+  const lowerBound = (arr, x) => {  // first index with arr[i] >= x
+    let lo = 0, hi = arr.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] < x) lo = mid + 1; else hi = mid; }
+    return lo;
+  };
+  function snapFrac(frac) {
+    if (!snapGrid || !snapCheck.checked) return frac;
+    const lo = Math.min(lowerBound(snapGrid, frac), snapGrid.length - 1);
+    const best = lo > 0 && frac - snapGrid[lo - 1] < snapGrid[lo] - frac ? snapGrid[lo - 1] : snapGrid[lo];
+    return Math.max(0, Math.min(1, best));
+  }
+  function drawBeatTicks() {
+    const w = tickCanvas.clientWidth, h = tickCanvas.clientHeight, dpr = window.devicePixelRatio || 1;
+    tickCanvas.width = Math.round(w * dpr); tickCanvas.height = Math.round(h * dpr);
+    const g = tickCanvas.getContext('2d');
+    g.clearRect(0, 0, tickCanvas.width, tickCanvas.height);
+    if (!snapGrid || !looping || !snapCheck.checked || !w) return;
+    const style = getComputedStyle(card), tw = Math.max(1, Math.round(dpr));
+    const from = Math.max(0, lowerBound(snapGrid, viewStart) - 1), span = viewEnd - viewStart;
+    for (const beatPass of [false, true]) {  // subdivisions first, the beats over them
+      g.fillStyle = style.getPropertyValue(beatPass ? '--text' : '--muted') || '#928374';
+      const top = beatPass ? 0 : tickCanvas.height / 2;
+      let lastX = -Infinity;
+      for (let i = from; i < snapGrid.length && snapGrid[i] <= viewEnd + span * 0.01; i++) {
+        if (snapIsBeat[i] !== beatPass) continue;
+        const x = Math.round((snapGrid[i] - viewStart) / span * w * dpr);
+        if (x - lastX < 3 * dpr) continue;  // thin out ticks that would overlap
+        g.fillRect(x - (tw >> 1), top, tw, tickCanvas.height - top);
+        lastX = x;
+      }
+    }
+  }
+  function showLoopControls() {
+    zoomRow.classList.toggle('hidden', !looping);
+    snapToggle.classList.toggle('hidden', !beatFracs || !looping);
+    gridWrap.classList.toggle('hidden', !beatFracs || !looping || !snapCheck.checked);
+  }
+  if (beatFracs) {
+    const gaps = beatFracs.slice(1).map((b, i) => b - beatFracs[i]).sort((a, b) => a - b);
+    const autoK = Math.round(Math.log2(gaps[gaps.length >> 1] * beats.duration / SNAP_S));
+    gridSlider.value = Math.max(-5, Math.min(4, -Math.max(0, autoK)));
+    const setGrid = () => {
+      buildSnapGrid(-gridSlider.value);
+      drawBeatTicks();
+    };
+    gridSlider.addEventListener('input', setGrid);
+    setGrid();
+    try { snapCheck.checked = localStorage.getItem('neiro-snap') !== '0'; } catch {}
+    snapCheck.addEventListener('change', () => {
+      try { localStorage.setItem('neiro-snap', snapCheck.checked ? '1' : '0'); } catch {}
+      showLoopControls();
+      drawBeatTicks();
+    });
+  }
+  new ResizeObserver(drawBeatTicks).observe(seekWrap);
   applyView();
 
   // Loop markers: blue (start) and red (end), dragged along the seek bar. They take their
@@ -2665,13 +2771,15 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
     looping = loopCheck.checked;
     seekWrap.classList.toggle('pp-loop-off', !looping);
     if (!looping) setView(0, 1);  // the zoom controls go away with the loop, so don't leave it zoomed
-    zoomRow.classList.toggle('hidden', !looping);
+    showLoopControls();
+    drawBeatTicks();
     ensureWindow();
   });
   [[loopStartEl, true], [loopEndEl, false]].forEach(([el, isStart]) => {
     let drag = false, grabOffset = 0;  // px from the marker's line to where it was grabbed
     function setMarker(e) {
       let frac = xToFrac(e.clientX - grabOffset);
+      if (!e.altKey) frac = snapFrac(frac);
       const gap = Math.min(0.5, 1 / duration);  // keep the loop at least a second long
       if (isStart) loopStart = Math.min(frac, loopEnd - gap);
       else loopEnd = Math.max(frac, loopStart + gap);
@@ -3528,7 +3636,7 @@ async function openResult(jobId, item = null, pushUrl = true) {
       }
       await showKaraokePlayer(data.files, chosenCandidate, artist, title, true);
     } else {
-      await showResults(data.files, true, jobId, data.frame_index);
+      await showResults(data.files, true, jobId, data.frame_index, data.beats);
       shareUrlEl.value = `${location.origin}/result/${jobId}`;
       shareRow.classList.remove('hidden');
     }
