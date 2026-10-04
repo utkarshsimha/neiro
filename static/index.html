@@ -674,6 +674,23 @@
       font-size: .74rem; color: var(--muted); cursor: pointer; user-select: none;
     }
     .pp-loop-toggle input { accent-color: var(--blue); cursor: pointer; margin: 0; }
+    .pp-view-row {
+      display: flex; align-items: center; flex-wrap: wrap; gap: .7rem;
+      padding: .45rem 1.1rem;
+      background: rgba(0,0,0,.14);
+      border-bottom: 1px solid var(--border);
+      font-size: .74rem; color: var(--muted);
+    }
+    .pp-mini-btn {
+      width: 28px; height: 24px; border-radius: 6px; padding: 0;
+      border: 1px solid var(--border); background: transparent;
+      color: var(--muted); font-size: .72rem; cursor: pointer;
+      transition: border-color .15s, color .15s;
+    }
+    .pp-mini-btn:hover:not(:disabled) { border-color: var(--green); color: var(--green); }
+    .pp-mini-btn:disabled { opacity: .4; cursor: not-allowed; }
+    .pp-zoom-value { min-width: 3em; text-align: center; font-variant-numeric: tabular-nums; }
+    .pp-view-hint { opacity: .6; margin-left: auto; }
     .pp-time {
       font-size: .7rem; color: var(--muted); white-space: nowrap;
       min-width: 88px; text-align: right;
@@ -2211,7 +2228,19 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
         <div class="pp-seek-tooltip"></div>
       </div>
       <span class="pp-time">Loading…</span>
+    </div>
+    <div class="pp-view-row">
       <label class="pp-loop-toggle"><input type="checkbox" class="pp-loop-check">loop</label>
+    </div>
+    <div class="pp-view-row pp-zoom-row hidden">
+      <span class="pp-view-label">zoom</span>
+      <button type="button" class="pp-mini-btn pp-pan-left" title="Pan left" disabled>◀</button>
+      <button type="button" class="pp-mini-btn pp-zoom-out" title="Zoom out" disabled>−</button>
+      <span class="pp-zoom-value">1×</span>
+      <button type="button" class="pp-mini-btn pp-zoom-in" title="Zoom in" disabled>+</button>
+      <button type="button" class="pp-mini-btn pp-pan-right" title="Pan right" disabled>▶</button>
+      <label class="pp-loop-toggle" title="While playing, scroll the zoomed view along with the playhead"><input type="checkbox" class="pp-follow-check" checked>follow</label>
+      <span class="pp-view-hint">ctrl+scroll zooms · shift+scroll pans</span>
     </div>
     <div class="pp-speed-row">
       <span class="pp-speed-icon">⏱</span>
@@ -2244,6 +2273,13 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
   const loopRegion  = card.querySelector('.pp-loop-region');
   const loopStartEl = card.querySelector('.pp-loop-start');
   const loopEndEl   = card.querySelector('.pp-loop-end');
+  const zoomRow     = card.querySelector('.pp-zoom-row');
+  const followCheck = card.querySelector('.pp-follow-check');
+  const panLeftBtn  = card.querySelector('.pp-pan-left');
+  const panRightBtn = card.querySelector('.pp-pan-right');
+  const zoomOutBtn  = card.querySelector('.pp-zoom-out');
+  const zoomInBtn   = card.querySelector('.pp-zoom-in');
+  const zoomValueEl = card.querySelector('.pp-zoom-value');
   const timeEl      = card.querySelector('.pp-time');
   const gbBtn       = card.querySelector('.gb-export-btn');
   const speedSlider    = card.querySelector('.pp-speed-slider');
@@ -2425,6 +2461,7 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
     track = t;
     duration = t.duration;
     currentRate = t.rate;
+    applyView();  // the zoom limits depend on the duration
   }
 
   function computedVol(stem) {
@@ -2525,14 +2562,62 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
 
   // Drag-to-seek — commits only on pointerup; display updates live during drag
   let seekDragging = false, seekDragTime = null;
-  function seekT(e) {
+
+  // Zoom and pan: the seek bar shows the part of the track from viewStart to viewEnd (as
+  // fractions), so everything on it — playhead, loop markers — is placed through
+  // fracToPct and read back through xToFrac.
+  let viewStart = 0, viewEnd = 1;
+  const fracToPct = f => (f - viewStart) / (viewEnd - viewStart) * 100;
+  function xToFrac(clientX) {
     const r = seekWrap.getBoundingClientRect();
-    return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * duration;
+    return viewStart + Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * (viewEnd - viewStart);
+  }
+  const minSpan = () => duration ? Math.min(1, Math.max(2 / duration, 1 / 512)) : 1;  // ≥ ~2s in view
+  function setView(start, span) {
+    span = Math.max(minSpan(), Math.min(1, span));
+    viewStart = Math.max(0, Math.min(1 - span, start));
+    viewEnd = viewStart + span;
+    applyView();
+  }
+  function zoomBy(factor, anchor = (viewStart + viewEnd) / 2) {  // `anchor` stays where it is on screen
+    const span = viewEnd - viewStart, rel = (anchor - viewStart) / span;
+    setView(anchor - rel * span / factor, span / factor);
+  }
+  function panBy(spans) { setView(viewStart + spans * (viewEnd - viewStart), viewEnd - viewStart); }
+  function applyView() {
+    const span = viewEnd - viewStart;
+    showLoop();
+    zoomValueEl.textContent = (+(1 / span).toFixed(span < 0.1 ? 0 : 1)) + '×';
+    zoomInBtn.disabled = !duration || span <= minSpan() + 1e-9;
+    zoomOutBtn.disabled = span >= 1;
+    panLeftBtn.disabled = viewStart <= 0;
+    panRightBtn.disabled = viewEnd >= 1;
+  }
+  zoomInBtn.addEventListener('click', () => zoomBy(2));
+  zoomOutBtn.addEventListener('click', () => zoomBy(0.5));
+  panLeftBtn.addEventListener('click', () => panBy(-0.25));
+  panRightBtn.addEventListener('click', () => panBy(0.25));
+  seekWrap.addEventListener('wheel', e => {
+    if (!duration || !looping) return;
+    if (e.ctrlKey || e.metaKey) {  // (also a trackpad pinch)
+      e.preventDefault();
+      zoomBy(Math.exp(-e.deltaY * 0.01), xToFrac(e.clientX));
+    } else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      e.preventDefault();
+      panBy((e.deltaX || e.deltaY) / seekWrap.getBoundingClientRect().width);
+    }
+  }, { passive: false });
+  let playheadWasInView = true;  // to page the view along when playback runs off its edge
+
+  function seekT(e) { return xToFrac(e.clientX) * duration; }
+  function setPlayhead(t) {
+    const pct = fracToPct(t / duration);
+    seekFill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+    seekThumb.style.left = pct + '%';
+    seekThumb.style.display = pct < 0 || pct > 100 ? 'none' : '';
   }
   function showT(t) {
-    const pct = (t / duration) * 100;
-    seekFill.style.width = pct + '%';
-    seekThumb.style.left = pct + '%';
+    setPlayhead(t);
     if (!awaitingFirstAudio) timeEl.textContent = fmt(t) + ' / ' + fmt(duration);
   }
   function positionTooltip(clientX, t) {
@@ -2561,39 +2646,46 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
     seekDragTime = null;
   });
 
+  applyView();
+
   // Loop markers: blue (start) and red (end), dragged along the seek bar. They take their
   // pointer events for themselves, so grabbing one doesn't seek.
   function showLoop() {
-    loopStartEl.style.left = (loopStart * 100) + '%';
-    loopEndEl.style.left = (loopEnd * 100) + '%';
-    loopRegion.style.left = (loopStart * 100) + '%';
-    loopRegion.style.width = ((loopEnd - loopStart) * 100) + '%';
+    const a = fracToPct(loopStart), b = fracToPct(loopEnd);
+    loopStartEl.style.left = a + '%';
+    loopEndEl.style.left = b + '%';
+    loopStartEl.style.display = a < 0 || a > 100 ? 'none' : '';  // off screen, when zoomed
+    loopEndEl.style.display = b < 0 || b > 100 ? 'none' : '';
+    const l = Math.max(0, a), r = Math.min(100, b);
+    loopRegion.style.left = l + '%';
+    loopRegion.style.width = Math.max(0, r - l) + '%';
   }
   showLoop();
   loopCheck.addEventListener('change', () => {
     looping = loopCheck.checked;
     seekWrap.classList.toggle('pp-loop-off', !looping);
+    if (!looping) setView(0, 1);  // the zoom controls go away with the loop, so don't leave it zoomed
+    zoomRow.classList.toggle('hidden', !looping);
     ensureWindow();
   });
   [[loopStartEl, true], [loopEndEl, false]].forEach(([el, isStart]) => {
     let drag = false, grabOffset = 0;  // px from the marker's line to where it was grabbed
     function setMarker(e) {
-      const r = seekWrap.getBoundingClientRect();
-      const frac = Math.max(0, Math.min(1, (e.clientX - grabOffset - r.left) / r.width));
+      let frac = xToFrac(e.clientX - grabOffset);
       const gap = Math.min(0.5, 1 / duration);  // keep the loop at least a second long
       if (isStart) loopStart = Math.min(frac, loopEnd - gap);
       else loopEnd = Math.max(frac, loopStart + gap);
       showLoop();
-      const t = (isStart ? loopStart : loopEnd) * duration;
-      seekTooltip.style.left = ((t / duration) * 100) + '%';
-      seekTooltip.textContent = fmt(t);
+      const f = isStart ? loopStart : loopEnd;
+      seekTooltip.style.left = fracToPct(f) + '%';
+      seekTooltip.textContent = fmt(f * duration);
     }
     el.addEventListener('pointerdown', e => {
       e.stopPropagation();
       if (!duration) return;
       drag = true; seekWrap.classList.add('dragging'); el.setPointerCapture(e.pointerId);
       const r = seekWrap.getBoundingClientRect();
-      grabOffset = e.clientX - (r.left + (isStart ? loopStart : loopEnd) * r.width);
+      grabOffset = e.clientX - (r.left + fracToPct(isStart ? loopStart : loopEnd) / 100 * r.width);
       setMarker(e);
     });
     el.addEventListener('pointermove', e => {
@@ -2633,9 +2725,13 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null) {
       }
       if (!seekDragging && duration && !awaitingFirstAudio) {
         const p = getPosition();
-        const pct = (p / duration) * 100;
-        seekFill.style.width = pct + '%';
-        seekThumb.style.left = pct + '%';
+        const pf = p / duration;
+        if (ppPlaying && followCheck.checked && playheadWasInView && !(pf >= viewStart && pf <= viewEnd)) {  // ran off the edge (or looped back): follow it
+          const span = viewEnd - viewStart;
+          setView(pf - span * 0.1, span);
+        }
+        playheadWasInView = pf >= viewStart && pf <= viewEnd;
+        setPlayhead(p);
         timeEl.textContent = fmt(p) + ' / ' + fmt(duration);
       }
       rafId = requestAnimationFrame(tick);
