@@ -2385,6 +2385,25 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null, be
       }
     } catch {}
   }
+  // Fader levels persist per track the same way.
+  const mixKey = r2Source ? 'neiro-mix:' + r2Source.prefix.split('/').pop() : null;
+  if (mixKey) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(mixKey));
+      const vols = saved?.vols || {};
+      stems.forEach(s => {
+        if (typeof vols[s] === 'number' && vols[s] >= 0 && vols[s] <= 1) faderVols[s] = vols[s];
+        if (saved?.solo?.includes(s)) soloSet.add(s);
+        if (saved?.mute?.includes(s)) muteSet.add(s);
+      });
+    } catch {}
+  }
+  function saveMix() {
+    if (!mixKey) return;
+    try {
+      localStorage.setItem(mixKey, JSON.stringify({ vols: faderVols, solo: [...soloSet], mute: [...muteSet] }));
+    } catch {}
+  }
   function saveLoop() {
     if (!loopKey) return;
     try { localStorage.setItem(loopKey, JSON.stringify({ start: loopStart, end: loopEnd })); } catch {}
@@ -2489,9 +2508,8 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null, be
   }
 
   function applyVolumes() {
-    if (!gainNodes) return;
     stems.forEach(stem => {
-      gainNodes[stem].gain.value = computedVol(stem);
+      if (gainNodes) gainNodes[stem].gain.value = computedVol(stem);
       const track = card.querySelector(`.pp-track[data-stem="${stem}"]`);
       if (track) track.classList.toggle('is-silenced', computedVol(stem) === 0 && !soloSet.has(stem));
     });
@@ -3106,20 +3124,24 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null, be
   speedApplyBtn.addEventListener('click', () => applySpeed(sliderToRate()));
 
   card.querySelectorAll('.pp-solo-btn').forEach(btn => {
+    btn.classList.toggle('active', soloSet.has(btn.dataset.stem));
     btn.addEventListener('click', () => {
       const stem = btn.dataset.stem;
       soloSet.has(stem) ? soloSet.delete(stem) : soloSet.add(stem);
       btn.classList.toggle('active', soloSet.has(stem));
       applyVolumes();
+      saveMix();
     });
   });
 
   card.querySelectorAll('.pp-mute-btn').forEach(btn => {
+    btn.classList.toggle('active', muteSet.has(btn.dataset.stem));
     btn.addEventListener('click', () => {
       const stem = btn.dataset.stem;
       muteSet.has(stem) ? muteSet.delete(stem) : muteSet.add(stem);
       btn.classList.toggle('active', muteSet.has(stem));
       applyVolumes();
+      saveMix();
     });
   });
 
@@ -3129,18 +3151,24 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null, be
     const thumb = wrap.querySelector('.pp-fader-thumb');
     const label = card.querySelector(`.pp-vol-label[data-stem="${stem}"]`);
     let drag = false;
+    function showF(p) {
+      fill.style.width = (p * 100) + '%'; thumb.style.left = (p * 100) + '%';
+      if (label) label.textContent = Math.round(p * 100);
+    }
     function setF(e) {
       const r = wrap.getBoundingClientRect();
       const p = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
       faderVols[stem] = p;
-      fill.style.width = (p * 100) + '%'; thumb.style.left = (p * 100) + '%';
-      if (label) label.textContent = Math.round(p * 100);
+      showF(p);
       if (gainNodes) gainNodes[stem].gain.value = computedVol(stem);
     }
+    showF(faderVols[stem]);
     wrap.addEventListener('pointerdown', e => { drag = true; wrap.setPointerCapture(e.pointerId); setF(e); });
     wrap.addEventListener('pointermove', e => { if (drag) setF(e); });
-    wrap.addEventListener('pointerup',   () => { drag = false; });
+    wrap.addEventListener('pointerup',   () => { drag = false; saveMix(); });
   });
+
+  applyVolumes();  // dim stems restored as muted / not soloed
 
   practicePlayer = {
     pause:   () => { if (ppPlaying) doPause(); },
@@ -3234,7 +3262,7 @@ function buildPracticeCard(stemFilesMap, r2Source = null, rangeSource = null, be
       gainNodes = {};
       stems.forEach(stem => {
         gainNodes[stem] = ctx.createGain();
-        gainNodes[stem].gain.value = 1;
+        gainNodes[stem].gain.value = computedVol(stem);
         gainNodes[stem].connect(ctx.destination);
       });
       startTicker();
