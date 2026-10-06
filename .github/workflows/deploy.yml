@@ -1,0 +1,43 @@
+# Deploy to Modal (both the "neiro" and legacy "song-lab" app names — see `make deploy`)
+# whenever something lands on main, e.g. a merged PR. Can also be run by hand from the
+# Actions tab.
+#
+# Needs the repo secrets MODAL_TOKEN_ID / MODAL_TOKEN_SECRET (a Modal API token for the
+# workspace the app is deployed to). Cobalt (`make deploy-cobalt`) is deployed separately.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+# One deploy at a time; a newer push waits for the running deploy rather than racing it.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      # `modal deploy` only imports modal_app.py locally (which needs just `modal` and the
+      # stdlib-only neiro_common) — the images themselves are built on Modal — so install
+      # the Modal CLI alone, at the version pinned in uv.lock, not the whole project.
+      - name: Install Modal CLI
+        run: |
+          uv venv
+          uv export --frozen --extra web --no-hashes --no-emit-project | grep -E '^modal==' > modal-req.txt
+          uv pip install -r modal-req.txt
+
+      - name: Deploy
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: make deploy MODAL=".venv/bin/modal"

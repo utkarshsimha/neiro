@@ -31,12 +31,16 @@ web: ## Run local dev server on :8000
 	uv sync --extra web
 	uv run uvicorn app:app --reload --port 8000
 
+# How to invoke the Modal CLI. CI overrides this (MODAL=.venv/bin/modal) to skip syncing the full
+# project — torch and the rest — just to deploy; see .github/workflows/deploy.yml.
+MODAL ?= uv run modal
+
 deploy: ## Deploy to Modal (GPU), under both the current and legacy app name
-	uv run modal deploy modal_app.py
+	$(MODAL) deploy modal_app.py
 	$(MAKE) deploy-legacy
 
 deploy-legacy: ## Redeploy the same code under the old "song-lab" app name, so old shared links keep working
-	uv run modal deploy modal_app.py --name song-lab
+	$(MODAL) deploy modal_app.py --name song-lab
 
 deploy-cobalt: ## Deploy the self-hosted Cobalt YouTube-extraction service (see cobalt_app.py)
 	@# One shell, so the generated key can be printed: Modal can't show a secret's value later.
