@@ -17,7 +17,8 @@ mostly stable library code; day-to-day work happens in `app.py`, `modal_app.py`,
 make setup    # uv sync --extra web — installs deps into .venv
 make web      # uv run uvicorn app:app --reload --port 8000 — local CPU dev server
 make deploy   # deploys to Modal (GPU) under both the "neiro" and legacy "song-lab" app
-              # names, so previously shared song-lab URLs keep working
+              # names, so previously shared song-lab URLs keep working. Also runs
+              # automatically on every push to main (.github/workflows/deploy.yml)
 make run INPUT=song.mp3 [OUTPUT=./output] [CPU=1]   # CLI separation via inference.py
 make r2-setup [BUCKET=neiro]   # one-time R2 bucket config (CORS + tmp/ expiry) via wrangler
 make clean    # remove .venv, __pycache__, output/
