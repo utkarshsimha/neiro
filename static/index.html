@@ -1019,31 +1019,48 @@
       border-radius: 99px; padding: .15rem .55rem;
       margin-left: .4rem; vertical-align: middle;
     }
-    .lib-versions { margin-top: .6rem; }
-    .lib-versions summary {
-      cursor: pointer; font-size: .72rem; color: var(--muted);
-      list-style: none; user-select: none;
-      display: inline-flex; align-items: center; gap: .35rem;
-      transition: color .15s;
+    .lib-card-hint { font-size: .72rem; color: var(--muted); margin-top: .6rem; }
+    .lib-card-group:hover .lib-card-hint { color: var(--text); }
+
+    /* Versions picker: a grouped card's versions fanned out over the dimmed page */
+    .versions-overlay {
+      overflow-y: auto; align-items: flex-start;
+      background: rgba(0,0,0,.72); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
     }
-    .lib-versions summary::-webkit-details-marker { display: none; }
-    .lib-versions summary::before { content: '▸'; font-size: .65rem; }
-    .lib-versions[open] summary::before { content: '▾'; }
-    .lib-versions summary:hover { color: var(--text); }
-    .lib-version-row {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: .45rem .1rem; border-top: 1px solid var(--border);
-      gap: .5rem;
+    .versions-panel { width: 100%; max-width: 760px; margin: auto 0; padding: 1rem 0; }
+    .versions-header {
+      display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+      margin-bottom: 1rem;
     }
-    .lib-version-row:first-of-type { margin-top: .5rem; }
-    .lib-version-row-main { display: flex; flex-direction: column; gap: .1rem; overflow: hidden; }
-    .lib-version-label {
-      font-size: .78rem; color: var(--text); cursor: pointer;
+    .versions-header h3 {
+      font-size: 1.15rem; font-weight: 700; letter-spacing: -.01em; color: var(--text);
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    .lib-version-label:hover { color: var(--accent-mode, var(--green)); }
-    .lib-version-date { font-size: .66rem; color: var(--muted); }
-    .lib-version-actions { display: flex; gap: .3rem; flex-shrink: 0; }
+    .versions-sub { font-size: .8rem; color: var(--muted); margin-top: .15rem; }
+    .versions-close {
+      background: var(--surface2); border: 1px solid var(--border); color: var(--muted);
+      border-radius: 99px; width: 2rem; height: 2rem; flex-shrink: 0;
+      font-size: .9rem; cursor: pointer; transition: color .15s, border-color .15s;
+    }
+    .versions-close:hover { color: var(--text); border-color: var(--muted); }
+    .versions-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: .85rem;
+    }
+    /* Show the whole title: the suffix ("- GG version") is what tells versions apart */
+    .versions-grid .lib-title { white-space: normal; overflow-wrap: anywhere; }
+    /* `backwards` (not `both`), so once in, the card's hover transform still applies */
+    .versions-grid.fan-in .lib-card {
+      animation: version-fan-in .32s cubic-bezier(.2, .8, .3, 1) backwards;
+      animation-delay: calc(var(--i, 0) * 45ms);
+    }
+    @keyframes version-fan-in {
+      from { opacity: 0; transform: translateY(14px) scale(.94); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .versions-grid.fan-in .lib-card { animation: none; }
+    }
 
     /* ── Save / rename modal ────────────────────────────────────────────── */
     .modal-overlay {
@@ -1359,6 +1376,20 @@
   </div>
 
 </div><!-- /container -->
+
+<!-- ── Versions picker (see openVersionsPicker) ────────────────────────────── -->
+<div id="versions-overlay" class="modal-overlay versions-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="versions-heading">
+  <div class="versions-panel">
+    <div class="versions-header">
+      <div style="min-width:0">
+        <h3 id="versions-heading"></h3>
+        <div class="versions-sub" id="versions-sub"></div>
+      </div>
+      <button type="button" class="versions-close" id="versions-close" aria-label="Close">✕</button>
+    </div>
+    <div class="versions-grid" id="versions-grid"></div>
+  </div>
+</div>
 
 <!-- ── Save / rename modal ─────────────────────────────────────────────────── -->
 <div id="save-modal" class="modal-overlay hidden">
@@ -3308,7 +3339,7 @@ document.addEventListener('keydown', e => {
   if (!isSpace && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
   if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
   if (!keyboardOwnsTarget(e.target, isSpace)) return;
-  if (!saveModal.classList.contains('hidden')) return;
+  if (!saveModal.classList.contains('hidden') || versionsOpenIds) return;
 
   const karaoke = !karaokePlayerCard.classList.contains('hidden') && kpAudioInstrum.duration;
   if (isSpace) {
@@ -3513,71 +3544,86 @@ function groupLibraryItems(items) {
     .sort((a, b) => new Date(b[0].created_at) - new Date(a[0].created_at));
 }
 
-function buildLibraryGroupCard(versions) {
-  const primary  = versions[0]; // most recent — badge/date/default-click target
+function groupDisplayTitle(versions) {
   const shortest = versions.reduce((a, b) => (b.title || '').length < (a.title || '').length ? b : a);
+  return shortest.title || '';
+}
+
+function buildLibraryGroupCard(versions) {
+  const primary = versions[0]; // most recent — badge/date
+  const title = groupDisplayTitle(versions);
   const card = document.createElement('div');
   card.className = `lib-card lib-card-group mode-${primary.mode}`;
   const badge = primary.mode === 'karaoke' ? '🎤 Karaoke' : '🎸 Practice';
-  const titleText = shortest.title ? escapeHtml(shortest.title) : 'Untitled';
-  const titleHtml = `<div class="lib-title${shortest.title ? '' : ' untitled'}">${titleText}<span class="lib-version-chip">${versions.length} versions</span></div>`;
   card.innerHTML = `
     <span class="lib-badge">${badge}</span>
-    ${titleHtml}
+    <div class="lib-title${title ? '' : ' untitled'}">${title ? escapeHtml(title) : 'Untitled'}<span class="lib-version-chip">${versions.length} versions</span></div>
     <div class="lib-artist">${primary.artist ? escapeHtml(primary.artist) : '&nbsp;'}</div>
     <div class="lib-meta">
-      <span class="lib-date">${fmtDate(primary.created_at)}</span>
+      <span class="lib-date">Latest ${fmtDate(primary.created_at)}</span>
     </div>
-    <details class="lib-versions">
-      <summary>Show versions</summary>
-      <div class="lib-version-list"></div>
-    </details>
+    <div class="lib-card-hint">Choose a version →</div>
   `;
-  const listEl = card.querySelector('.lib-version-list');
-  versions.forEach(v => {
-    const row = document.createElement('div');
-    row.className = 'lib-version-row';
-    row.innerHTML = `
-      <div class="lib-version-row-main">
-        <span class="lib-version-label">${v.title ? escapeHtml(v.title) : '<em>Untitled</em>'}</span>
-        <span class="lib-version-date">${fmtDate(v.created_at)}</span>
-      </div>
-      <div class="lib-version-actions">
-        <button type="button" class="lib-rename-btn" title="Rename">✎</button>
-        <button type="button" class="lib-delete-btn" title="Delete">🗑</button>
-      </div>
-    `;
-    row.querySelector('.lib-version-label').addEventListener('click', e => {
-      e.stopPropagation();
-      openResult(v.job_id, v);
-    });
-    row.querySelector('.lib-rename-btn').addEventListener('click', e => {
-      e.stopPropagation();
-      openSaveModal({ kind: 'rename', jobId: v.job_id }, 'Rename', v.artist, v.title);
-    });
-    row.querySelector('.lib-delete-btn').addEventListener('click', async e => {
-      e.stopPropagation();
-      const label = v.title ? `"${v.title}"` : 'this untitled track';
-      if (!confirm(`Delete ${label} from your library? This can't be undone.`)) return;
-      const btn = e.currentTarget;
-      btn.disabled = true;
-      try {
-        const resp = await fetch(`/api/library/${v.job_id}`, { method: 'DELETE' });
-        if (!resp.ok) throw new Error(await resp.text());
-        loadLibrary(); // full reload — recomputes groups, e.g. collapses back to a singleton card
-      } catch (err) {
-        btn.disabled = false;
-        alert('Delete failed: ' + err.message);
-      }
-    });
-    listEl.appendChild(row);
-  });
-  card.addEventListener('click', e => {
-    if (e.target.closest('.lib-versions')) return;
-    openResult(primary.job_id, primary);
-  });
+  // Never auto-picks a version: the user chooses one from the picker.
+  card.addEventListener('click', () => openVersionsPicker(versions));
   return card;
 }
+
+// ── Versions picker: a grouped card's versions as full library cards (open, rename,
+// delete each) over the dimmed page. Tracks which group is showing so that a library
+// reload after a rename/delete refreshes it in place (or closes it once one version is left).
+const versionsOverlay = document.getElementById('versions-overlay');
+const versionsHeading = document.getElementById('versions-heading');
+const versionsSub     = document.getElementById('versions-sub');
+const versionsGrid    = document.getElementById('versions-grid');
+let versionsOpenIds = null;  // job ids of the group on screen, or null when closed
+
+function renderVersionsPicker(versions, animate) {
+  versionsOpenIds = new Set(versions.map(v => v.job_id));
+  const title = groupDisplayTitle(versions);
+  versionsHeading.textContent = title || 'Untitled';
+  const artist = versions.find(v => v.artist)?.artist;
+  versionsSub.textContent = `${artist ? artist + ' · ' : ''}${versions.length} versions — pick one to open`;
+  versionsGrid.classList.toggle('fan-in', animate);
+  versionsGrid.innerHTML = '';
+  versions.forEach((v, i) => {
+    const card = buildLibraryCard(v);
+    card.style.setProperty('--i', i);
+    versionsGrid.appendChild(card);
+  });
+}
+
+function openVersionsPicker(versions) {
+  renderVersionsPicker(versions, true);
+  versionsOverlay.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  document.getElementById('versions-close').focus({ preventScroll: true });
+}
+
+function closeVersionsPicker() {
+  if (!versionsOpenIds) return;
+  versionsOpenIds = null;
+  versionsOverlay.classList.add('hidden');
+  versionsGrid.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+// Called after the library reloads: show the open group's current versions.
+function refreshVersionsPicker(allGroups) {
+  if (!versionsOpenIds) return;
+  const group = allGroups.find(g => g.some(v => versionsOpenIds.has(v.job_id)));
+  if (group && group.length > 1) renderVersionsPicker(group, false);
+  else closeVersionsPicker();
+}
+
+document.getElementById('versions-close').addEventListener('click', closeVersionsPicker);
+// Clicking the dimmed background (anything but a card or the heading) closes it.
+versionsOverlay.addEventListener('click', e => {
+  if (!e.target.closest('.lib-card, .versions-header > div')) closeVersionsPicker();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && versionsOpenIds && saveModal.classList.contains('hidden')) closeVersionsPicker();
+});
 
 function escapeHtml(s) {
   const div = document.createElement('div');
@@ -3613,6 +3659,7 @@ function renderLibrary() {
   groups.forEach(versions => {
     libraryGrid.appendChild(versions.length > 1 ? buildLibraryGroupCard(versions) : buildLibraryCard(versions[0]));
   });
+  refreshVersionsPicker(allGroups);
 
   const totalItems = groups.reduce((n, g) => n + g.length, 0);
   libraryCountEl.textContent = totalItems ? `${totalItems} saved` : '';
@@ -3632,6 +3679,7 @@ librarySearchEl.addEventListener('input', renderLibrary);
 // depending on its mode. `item` (title/artist/mode) may already be known
 // from the library grid; otherwise it's read from the API response.
 async function openResult(jobId, item = null, pushUrl = true) {
+  closeVersionsPicker();
   if (pushUrl && location.pathname !== `/result/${jobId}`) {
     history.pushState({}, '', `/result/${jobId}`);
   }
